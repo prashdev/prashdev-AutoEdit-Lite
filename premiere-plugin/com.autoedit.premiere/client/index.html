@@ -17,6 +17,19 @@
     <button id="btn-choose-backend" class="btn btn-primary">
       Choose autoedit-lite folder
     </button>
+
+    <!-- Shown when folder dialog fails (e.g. on Windows with unsigned extension) -->
+    <div id="setup-manual" class="setup-manual hidden">
+      <p id="setup-error" class="setup-error"></p>
+      <p class="setup-manual-label">Paste the path to your autoedit-lite folder:</p>
+      <div class="setup-path-row">
+        <input id="input-manual-path" class="setup-path-input" type="text"
+               placeholder="e.g. C:\Users\Aditya\autoedit-lite" spellcheck="false"/>
+        <button id="btn-set-path" class="btn btn-small">Set</button>
+      </div>
+      <p id="path-error" class="path-error hidden">That folder doesn't contain main.py — check the path.</p>
+    </div>
+
     <p class="setup-hint">Select the folder that contains <code>main.py</code></p>
   </div>
 

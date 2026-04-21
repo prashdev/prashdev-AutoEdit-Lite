@@ -1,5 +1,16 @@
 /**
- * main.js — AutoEdit CEP panel logic v2.0
+ * main.js — AutoEdit CEP panel logic v2.1
+ *
+ * Fix 1: On startup, read installer-written settings.json from
+ *         %APPDATA%\AutoEdit\settings.json (Windows) or
+ *         ~/Library/Application Support/AutoEdit/settings.json (Mac)
+ *         and merge into localStorage so the panel auto-configures
+ *         after a clean install without requiring the folder dialog.
+ *
+ * Fix 2: When the ExtendScript folder dialog fails (common on Windows
+ *         with unsigned/debug extensions), reveal a plain text-input
+ *         so the user can type the path manually instead of seeing a
+ *         button that silently does nothing.
  */
 
 (function () {
@@ -21,6 +32,11 @@
   var screenSetup     = document.getElementById("screen-setup");
   var screenMain      = document.getElementById("screen-main");
   var btnChoose       = document.getElementById("btn-choose-backend");
+  var setupManual     = document.getElementById("setup-manual");
+  var setupError      = document.getElementById("setup-error");
+  var inputManualPath = document.getElementById("input-manual-path");
+  var btnSetPath      = document.getElementById("btn-set-path");
+  var pathError       = document.getElementById("path-error");
   var btnSettings     = document.getElementById("btn-settings");
   var btnBrowse       = document.getElementById("btn-browse");
   var fileDisplay     = document.getElementById("file-display");
@@ -46,10 +62,38 @@
   var videoPath = "";
 
   // ── Settings ───────────────────────────────────────────────────────────
+  function installerSettingsPath() {
+    if (os.platform() === "win32") {
+      var appData = process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming");
+      return path.join(appData, "AutoEdit", "settings.json");
+    }
+    return path.join(os.homedir(), "Library", "Application Support", "AutoEdit", "settings.json");
+  }
+
   function loadSettings() {
+    // 1. Try localStorage (fastest — already synced from a previous session)
     try {
       var raw = localStorage.getItem("autoedit_settings_v2");
-      if (raw) settings = JSON.parse(raw);
+      if (raw) {
+        var parsed = JSON.parse(raw);
+        if (parsed.backendPath) {
+          settings = parsed;
+          return;
+        }
+      }
+    } catch (e) {}
+
+    // 2. Try installer-written JSON (present after a clean install on Windows/Mac)
+    try {
+      var installerFile = installerSettingsPath();
+      if (fs.existsSync(installerFile)) {
+        var installerRaw = fs.readFileSync(installerFile, "utf8");
+        var installerParsed = JSON.parse(installerRaw);
+        if (installerParsed.backendPath) {
+          settings = installerParsed;
+          saveSettings();  // mirror into localStorage for next time
+        }
+      }
     } catch (e) {}
   }
 
@@ -90,25 +134,60 @@
   loadSettings();
   isConfigured() ? showMain() : showSetup();
 
-  // ── Setup ──────────────────────────────────────────────────────────────
+  // ── Setup — folder dialog (with graceful fallback) ─────────────────────
   btnChoose.addEventListener("click", function () {
     csInterface.evalScript(
       'var f = Folder.selectDialog("Select your autoedit-lite folder"); f ? f.fsName : ""',
       function (sel) {
-        if (!sel || sel === "EvalScript error.") return;
-        sel = sel.trim();
-        if (!fs.existsSync(path.join(sel, "main.py"))) {
-          alert("That folder does not contain main.py.\nPlease select the autoedit-lite folder.");
+        // evalScript failed — ExtendScript bridge not available (common on Windows
+        // with debug/unsigned extensions). Show the manual text input instead.
+        if (!sel || sel === "EvalScript error." || sel.indexOf("EvalScript error") !== -1) {
+          setupError.textContent =
+            "Folder dialog is unavailable on this machine. " +
+            "Please type the path to your autoedit-lite folder below.";
+          setupManual.classList.remove("hidden");
+          inputManualPath.focus();
           return;
         }
-        settings.backendPath = sel;
-        settings.pythonPath  = settings.pythonPath || detectPython();
-        saveSettings();
-        showMain();
+
+        sel = sel.trim();
+        if (!validateAndApplyPath(sel)) {
+          // Validation failed — show manual fallback so user can correct it
+          setupError.textContent = "That folder does not contain main.py. Please check and try again.";
+          setupManual.classList.remove("hidden");
+          inputManualPath.value = sel;
+          inputManualPath.focus();
+        }
       }
     );
   });
 
+  // ── Setup — manual path input ──────────────────────────────────────────
+  btnSetPath.addEventListener("click", applyManualPath);
+
+  inputManualPath.addEventListener("keydown", function (e) {
+    if (e.key === "Enter") applyManualPath();
+  });
+
+  function applyManualPath() {
+    var typed = (inputManualPath.value || "").trim();
+    if (!typed) return;
+    pathError.classList.add("hidden");
+    if (!validateAndApplyPath(typed)) {
+      pathError.classList.remove("hidden");
+    }
+  }
+
+  function validateAndApplyPath(folderPath) {
+    if (!fs.existsSync(path.join(folderPath, "main.py"))) return false;
+    settings.backendPath = folderPath;
+    settings.pythonPath  = settings.pythonPath || detectPython();
+    saveSettings();
+    showMain();
+    return true;
+  }
+
+  // ── Settings gear icon ─────────────────────────────────────────────────
   btnSettings.addEventListener("click", showSetup);
 
   // ── Browse video ───────────────────────────────────────────────────────
@@ -116,15 +195,27 @@
     csInterface.evalScript(
       'var f = File.openDialog("Select a video file", "*.mp4;*.mov;*.mkv;*.webm", false); f ? f.fsName : ""',
       function (fp) {
-        if (!fp || fp === "EvalScript error.") return;
-        videoPath = fp.trim();
-        fileDisplay.textContent = path.basename(videoPath);
-        fileDisplay.classList.add("has-file");
-        fileDisplay.title = videoPath;
-        btnGenerate.disabled = false;
+        if (!fp || fp === "EvalScript error." || fp.indexOf("EvalScript error") !== -1) {
+          // Browse dialog failed — ask user to type path manually via a simple prompt
+          var typed = window.prompt("Folder dialog unavailable.\nPaste the full path to your video file:");
+          if (typed && typed.trim()) {
+            applyVideoPath(typed.trim());
+          }
+          return;
+        }
+        applyVideoPath(fp.trim());
       }
     );
   });
+
+  function applyVideoPath(fp) {
+    if (!fp || !fs.existsSync(fp)) return;
+    videoPath = fp;
+    fileDisplay.textContent = path.basename(videoPath);
+    fileDisplay.classList.add("has-file");
+    fileDisplay.title = videoPath;
+    btnGenerate.disabled = false;
+  }
 
   // ── Generate ───────────────────────────────────────────────────────────
   btnGenerate.addEventListener("click", function () {
@@ -250,6 +341,11 @@
 
   // ── UI transitions ─────────────────────────────────────────────────────
   function showSetup() {
+    // Reset manual fallback state when returning to setup
+    setupManual.classList.add("hidden");
+    setupError.textContent = "";
+    pathError.classList.add("hidden");
+    inputManualPath.value = "";
     screenSetup.classList.remove("hidden");
     screenMain.classList.add("hidden");
   }
