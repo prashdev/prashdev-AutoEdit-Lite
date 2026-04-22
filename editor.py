@@ -16,6 +16,19 @@ import sys
 from pathlib import Path
 
 
+def _has_audio_stream(video_path: Path) -> bool:
+    """Return True if the video file contains at least one audio stream."""
+    cmd = [
+        "ffprobe", "-v", "error",
+        "-select_streams", "a:0",
+        "-show_entries", "stream=codec_type",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        str(video_path),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    return bool(result.stdout.strip())
+
+
 def _get_video_duration(video_path: Path) -> float:
     """Use ffprobe to get the total duration of a video in seconds."""
     cmd = [
@@ -73,18 +86,13 @@ def cut_video(
         return 0.0
 
     n = len(segments)
+    has_audio = _has_audio_stream(input_path)
+    if not has_audio:
+        print("  [NOTE] Source video has no audio stream — output will be video-only.")
 
     # ── Build the filter_complex string ───────────────────────────────────
-    # For each segment we use the 'trim' filter on video and 'atrim' on audio,
-    # then setpts/asetpts to reset timestamps, then concat everything together.
-    #
-    # Example for 3 segments:
-    #   [0:v]trim=start=1.0:end=5.2,setpts=PTS-STARTPTS[v0];
-    #   [0:a]atrim=start=1.0:end=5.2,asetpts=PTS-STARTPTS[a0];
-    #   [0:v]trim=start=6.1:end=12.0,setpts=PTS-STARTPTS[v1];
-    #   [0:a]atrim=start=6.1:end=12.0,asetpts=PTS-STARTPTS[a1];
-    #   [v0][a0][v1][a1]concat=n=2:v=1:a=1[outv][outa]
-
+    # For each segment: trim video (and audio if present), reset timestamps,
+    # then concat all segments. Audio path is conditional on stream existence.
     filter_parts = []
     stream_labels = []
 
@@ -94,15 +102,19 @@ def cut_video(
         filter_parts.append(
             f"[0:v]trim=start={start}:end={end},setpts=PTS-STARTPTS[v{i}]"
         )
-        filter_parts.append(
-            f"[0:a]atrim=start={start}:end={end},asetpts=PTS-STARTPTS[a{i}]"
-        )
-        stream_labels.append(f"[v{i}][a{i}]")
+        if has_audio:
+            filter_parts.append(
+                f"[0:a]atrim=start={start}:end={end},asetpts=PTS-STARTPTS[a{i}]"
+            )
+            stream_labels.append(f"[v{i}][a{i}]")
+        else:
+            stream_labels.append(f"[v{i}]")
 
     concat_inputs = "".join(stream_labels)
-    filter_parts.append(
-        f"{concat_inputs}concat=n={n}:v=1:a=1[outv][outa]"
-    )
+    if has_audio:
+        filter_parts.append(f"{concat_inputs}concat=n={n}:v=1:a=1[outv][outa]")
+    else:
+        filter_parts.append(f"{concat_inputs}concat=n={n}:v=1:a=0[outv]")
 
     filter_complex = ";".join(filter_parts)
 
@@ -112,16 +124,22 @@ def cut_video(
         "-i", str(input_path),
         "-filter_complex", filter_complex,
         "-map", "[outv]",
-        "-map", "[outa]",
         "-c:v", "libx264",
         "-preset", "fast",
         "-crf", "20",
-        "-c:a", "aac",
-        "-b:a", "192k",
-        "-async", "1",                 # repair minor audio drift
         "-movflags", "+faststart",     # put metadata at front for web playback
         str(output_path),
     ]
+
+    if has_audio:
+        # Insert audio map + codec before the output path
+        cmd[-1:] = [
+            "-map", "[outa]",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-async", "1",
+            str(output_path),
+        ]
 
     if dry_run:
         print("  [DRY RUN] FFmpeg command that would run:")

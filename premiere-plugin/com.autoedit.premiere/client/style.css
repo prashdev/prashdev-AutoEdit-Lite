@@ -482,4 +482,55 @@ select:focus { border-color: var(--accent); }
   text-align: center;
   margin-top: -4px;
   margin-bottom: 10px;
+  word-break: break-all;
+}
+
+/* ── Output file paths ───────────────────────────────────────────────── */
+
+.output-files {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  margin-bottom: 10px;
+}
+
+.output-file-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+}
+
+.output-file-label {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  flex-shrink: 0;
+  width: 26px;
+}
+
+.output-file-path {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-family: "SF Mono", "Consolas", monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── SRT import button ───────────────────────────────────────────────── */
+
+.btn-srt {
+  background: var(--bg-card);
+  color: var(--success);
+  border: 1px solid rgba(74, 222, 128, 0.4);
+  margin-bottom: 8px;
+}
+
+.btn-srt:hover:not(:disabled) {
+  background: rgba(74, 222, 128, 0.08);
+  border-color: rgba(74, 222, 128, 0.7);
 }

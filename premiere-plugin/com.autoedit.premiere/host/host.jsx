@@ -7,6 +7,37 @@
  */
 
 /**
+ * Import an SRT subtitle file into the active Premiere project.
+ *
+ * @param  {string} srtPath  Absolute path to the .srt file on disk.
+ * @return {string}          "SUCCESS" or an error description string.
+ */
+function importSrtFile(srtPath) {
+  try {
+    if (!app.project) {
+      return "ERROR: No project is open in Premiere Pro. Please open a project first.";
+    }
+
+    var srtFile = new File(srtPath);
+    if (!srtFile.exists) {
+      return "ERROR: SRT file not found at: " + srtPath;
+    }
+
+    var success = app.project.importFiles(
+      [srtPath],
+      true,
+      app.project.rootItem,
+      false
+    );
+
+    return success ? "SUCCESS" : "IMPORT_FAILED";
+
+  } catch (e) {
+    return "ERROR: " + e.message;
+  }
+}
+
+/**
  * Import an FCP7 XML file as a new sequence in the active Premiere project.
  *
  * @param  {string} xmlPath  Absolute path to the .xml file on disk.

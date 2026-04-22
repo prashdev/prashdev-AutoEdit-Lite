@@ -11,7 +11,7 @@ from unittest.mock import patch
 import opentimelineio as otio
 import pytest
 
-from xml_export import _detect_fps, _inject_sequence_settings, export_premiere_xml
+from xml_export import _detect_fps, _inject_sequence_settings, _to_file_uri, export_premiere_xml
 
 
 FAKE_SEGMENTS = [
@@ -26,6 +26,17 @@ def _export(tmp_path, segments=None):
     with patch("xml_export._detect_fps", return_value=25.0):
         export_premiere_xml("/fake/video.mp4", segments or FAKE_SEGMENTS, str(out))
     return out
+
+
+class TestToFileUri:
+    def test_produces_file_scheme(self):
+        uri = _to_file_uri("/tmp/video.mp4")
+        assert uri.startswith("file://")
+
+    def test_absolute_path_encoded(self):
+        uri = _to_file_uri("/Users/foo/bar.mp4")
+        assert "foo" in uri
+        assert "bar.mp4" in uri
 
 
 class TestDetectFps:
@@ -130,7 +141,6 @@ class TestExportPremiereXml:
 
     def test_target_fps_overrides_detected(self, tmp_path):
         out = tmp_path / "fps30.xml"
-        # detected fps would be 25 from mock, but target_fps=30 should win
         with patch("xml_export._detect_fps", return_value=25.0):
             export_premiere_xml(
                 "/fake/video.mp4", FAKE_SEGMENTS, str(out),
@@ -138,3 +148,20 @@ class TestExportPremiereXml:
             )
         content = out.read_text()
         assert "<timebase>30</timebase>" in content
+
+    def test_pathurl_uses_file_uri(self, tmp_path):
+        out = _export(tmp_path)
+        content = out.read_text()
+        # pathurl must have file:// scheme so Premiere can find the media
+        assert "file://" in content
+
+    def test_otio_empty_format_replaced(self, tmp_path):
+        out = _export(tmp_path)
+        content = out.read_text()
+        # OTIO generates <format/> — we must replace it, not duplicate it
+        assert "<format/>" not in content
+
+    def test_audio_format_injected(self, tmp_path):
+        out = _export(tmp_path)
+        content = out.read_text()
+        assert "<samplerate>48000</samplerate>" in content

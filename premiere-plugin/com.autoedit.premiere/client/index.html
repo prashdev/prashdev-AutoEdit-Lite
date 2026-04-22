@@ -68,8 +68,10 @@
       <div class="setting-item">
         <div class="card-label">TARGET LENGTH</div>
         <select id="select-duration">
-          <option value="60">60s — 1 min</option>
-          <option value="90" selected>90s — 1.5 min ✓</option>
+          <option value="60">1 min (60s)</option>
+          <option value="90" selected>1 min 30s ✓</option>
+          <option value="105">1 min 45s</option>
+          <option value="120">2 min (120s)</option>
         </select>
       </div>
       <div class="setting-item">
@@ -165,13 +167,29 @@
         <div class="stat-badge" id="stat-badge"></div>
       </div>
 
+      <!-- Output file paths -->
+      <div id="output-files" class="output-files hidden">
+        <div class="output-file-row">
+          <span class="output-file-label">XML</span>
+          <span id="output-xml-path" class="output-file-path"></span>
+        </div>
+        <div class="output-file-row">
+          <span class="output-file-label">SRT</span>
+          <span id="output-srt-path" class="output-file-path"></span>
+        </div>
+      </div>
+
       <button id="btn-import" class="btn btn-primary hidden">
-        ↓ &nbsp;Import into Premiere
+        ↓ &nbsp;Import Timeline (.xml) into Premiere
       </button>
 
-      <div id="import-hint" class="import-hint hidden">
-        Or go to File → Import and pick the .xml file manually
-      </div>
+      <div id="import-hint" class="import-hint hidden"></div>
+
+      <button id="btn-import-srt" class="btn btn-srt hidden">
+        ↓ &nbsp;Import Subtitles (.srt) into Premiere
+      </button>
+
+      <div id="import-srt-hint" class="import-hint hidden"></div>
 
       <button id="btn-reset" class="btn btn-secondary">
         ↺ &nbsp;Start Over
