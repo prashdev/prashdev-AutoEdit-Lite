@@ -11,7 +11,14 @@ from unittest.mock import patch
 import opentimelineio as otio
 import pytest
 
-from xml_export import _detect_fps, _inject_sequence_settings, _to_file_uri, export_premiere_xml
+from xml_export import (
+    _build_file_audio_xml,
+    _detect_audio_channels,
+    _detect_fps,
+    _inject_sequence_settings,
+    _to_file_uri,
+    export_premiere_xml,
+)
 
 
 FAKE_SEGMENTS = [
@@ -20,11 +27,15 @@ FAKE_SEGMENTS = [
 ]
 
 
-def _export(tmp_path, segments=None):
-    """Helper: run export with mocked fps=25 and return the xml path."""
+def _export(tmp_path, segments=None, channel_count=2, width=1920, height=1080, target_fps=None):
+    """Helper: run export with mocked fps=25, stereo audio, return the xml path."""
     out = tmp_path / "output.xml"
-    with patch("xml_export._detect_fps", return_value=25.0):
-        export_premiere_xml("/fake/video.mp4", segments or FAKE_SEGMENTS, str(out))
+    with patch("xml_export._detect_fps", return_value=25.0), \
+         patch("xml_export._detect_audio_channels", return_value=channel_count):
+        export_premiere_xml(
+            "/fake/video.mp4", segments or FAKE_SEGMENTS, str(out),
+            width=width, height=height, target_fps=target_fps,
+        )
     return out
 
 
@@ -100,7 +111,8 @@ class TestExportPremiereXml:
 
     def test_nested_output_dirs_are_created(self, tmp_path):
         out = tmp_path / "deep" / "nested" / "output.xml"
-        with patch("xml_export._detect_fps", return_value=25.0):
+        with patch("xml_export._detect_fps", return_value=25.0), \
+             patch("xml_export._detect_audio_channels", return_value=2):
             export_premiere_xml("/fake/video.mp4", FAKE_SEGMENTS, str(out))
         assert out.exists()
 
@@ -117,35 +129,20 @@ class TestExportPremiereXml:
         assert otio.schema.TrackKind.Audio in kinds
 
     def test_vertical_resolution_injected(self, tmp_path):
-        out = tmp_path / "vertical.xml"
-        with patch("xml_export._detect_fps", return_value=30.0):
-            export_premiere_xml(
-                "/fake/video.mp4", FAKE_SEGMENTS, str(out),
-                width=1080, height=1920, target_fps=30,
-            )
+        out = _export(tmp_path / "v.xml", width=1080, height=1920, target_fps=30)
         content = out.read_text()
         assert "<width>1080</width>" in content
         assert "<height>1920</height>" in content
         assert "<timebase>30</timebase>" in content
 
     def test_horizontal_resolution_injected(self, tmp_path):
-        out = tmp_path / "horizontal.xml"
-        with patch("xml_export._detect_fps", return_value=25.0):
-            export_premiere_xml(
-                "/fake/video.mp4", FAKE_SEGMENTS, str(out),
-                width=1920, height=1080,
-            )
+        out = _export(tmp_path / "h.xml", width=1920, height=1080)
         content = out.read_text()
         assert "<width>1920</width>" in content
         assert "<height>1080</height>" in content
 
     def test_target_fps_overrides_detected(self, tmp_path):
-        out = tmp_path / "fps30.xml"
-        with patch("xml_export._detect_fps", return_value=25.0):
-            export_premiere_xml(
-                "/fake/video.mp4", FAKE_SEGMENTS, str(out),
-                target_fps=30,
-            )
+        out = _export(tmp_path / "fps30.xml", target_fps=30)
         content = out.read_text()
         assert "<timebase>30</timebase>" in content
 
@@ -165,3 +162,97 @@ class TestExportPremiereXml:
         out = _export(tmp_path)
         content = out.read_text()
         assert "<samplerate>48000</samplerate>" in content
+
+    def test_stereo_channelcount_injected(self, tmp_path):
+        out = _export(tmp_path, channel_count=2)
+        content = out.read_text()
+        assert "<channelcount>2</channelcount>" in content
+
+    def test_mono_channelcount_injected(self, tmp_path):
+        out = _export(tmp_path, channel_count=1)
+        content = out.read_text()
+        assert "<channelcount>1</channelcount>" in content
+
+    def test_empty_audio_element_replaced(self, tmp_path):
+        out = _export(tmp_path, channel_count=2)
+        content = out.read_text()
+        assert "<audio/>" not in content
+
+    def test_stereo_channel_labels(self, tmp_path):
+        out = _export(tmp_path, channel_count=2)
+        content = out.read_text()
+        assert "<channellabel>left</channellabel>" in content
+        assert "<channellabel>right</channellabel>" in content
+
+    def test_mono_channel_label(self, tmp_path):
+        out = _export(tmp_path, channel_count=1)
+        content = out.read_text()
+        assert "<channellabel>mono</channellabel>" in content
+
+
+class TestDetectAudioChannels:
+    def test_fallback_on_exception(self):
+        with patch("xml_export.subprocess.run", side_effect=Exception("ffprobe missing")):
+            assert _detect_audio_channels("fake.mp4") == 2
+
+    def test_parses_stereo(self):
+        mock = type("R", (), {"stdout": "2", "returncode": 0})()
+        with patch("xml_export.subprocess.run", return_value=mock):
+            assert _detect_audio_channels("fake.mp4") == 2
+
+    def test_parses_mono(self):
+        mock = type("R", (), {"stdout": "1", "returncode": 0})()
+        with patch("xml_export.subprocess.run", return_value=mock):
+            assert _detect_audio_channels("fake.mp4") == 1
+
+    def test_parses_multichannel(self):
+        mock = type("R", (), {"stdout": "6", "returncode": 0})()
+        with patch("xml_export.subprocess.run", return_value=mock):
+            assert _detect_audio_channels("fake.mp4") == 6
+
+    def test_fallback_on_empty_output(self):
+        mock = type("R", (), {"stdout": "", "returncode": 0})()
+        with patch("xml_export.subprocess.run", return_value=mock):
+            assert _detect_audio_channels("fake.mp4") == 2
+
+    def test_fallback_on_zero_channels(self):
+        mock = type("R", (), {"stdout": "0", "returncode": 0})()
+        with patch("xml_export.subprocess.run", return_value=mock):
+            assert _detect_audio_channels("fake.mp4") == 2
+
+
+class TestBuildFileAudioXml:
+    def test_mono_channelcount(self):
+        xml = _build_file_audio_xml(1)
+        assert "<channelcount>1</channelcount>" in xml
+
+    def test_mono_label(self):
+        xml = _build_file_audio_xml(1)
+        assert "<channellabel>mono</channellabel>" in xml
+
+    def test_stereo_channelcount(self):
+        xml = _build_file_audio_xml(2)
+        assert "<channelcount>2</channelcount>" in xml
+
+    def test_stereo_left_label(self):
+        xml = _build_file_audio_xml(2)
+        assert "<channellabel>left</channellabel>" in xml
+
+    def test_stereo_right_label(self):
+        xml = _build_file_audio_xml(2)
+        assert "<channellabel>right</channellabel>" in xml
+
+    def test_stereo_source_channels(self):
+        xml = _build_file_audio_xml(2)
+        assert "<sourcechannel>1</sourcechannel>" in xml
+        assert "<sourcechannel>2</sourcechannel>" in xml
+
+    def test_multichannel_count(self):
+        xml = _build_file_audio_xml(6)
+        assert "<channelcount>6</channelcount>" in xml
+        assert xml.count("<audiochannel>") == 6
+
+    def test_output_is_valid_xml(self):
+        import xml.etree.ElementTree as ET
+        for ch in (1, 2, 4, 6):
+            ET.fromstring(_build_file_audio_xml(ch))  # raises on invalid XML
