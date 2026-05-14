@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Console variant. Inherits the parent terminal so Python stdout/stderr
+    stream through. Used by smoke tests and power users.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>AutoEditLite</RootNamespace>
+    <AssemblyName>AutoEditLite-CLI</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+
+    <!-- Isolate obj/bin so the two csprojs in this folder do not collide. -->
+    <BaseIntermediateOutputPath>obj\AutoEditLite-CLI\</BaseIntermediateOutputPath>
+    <BaseOutputPath>bin\AutoEditLite-CLI\</BaseOutputPath>
+
+    <!-- See note in AutoEditLite.csproj. Without this exclude, the SDK's
+         implicit Compile glob picks up the sibling project's AssemblyInfo. -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);obj\**;bin\**;publish\**</DefaultItemExcludes>
+  </PropertyGroup>
+</Project>

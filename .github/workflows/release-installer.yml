@@ -1,0 +1,111 @@
+name: Release installer
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version string baked into the installer"
+        required: true
+        default: "0.1.0-dev"
+
+permissions:
+  contents: write  # for the Release upload
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        run: |
+          $v = if ($env:GITHUB_REF -like 'refs/tags/v*') {
+            $env:GITHUB_REF -replace '^refs/tags/v', ''
+          } elseif ('${{ inputs.version }}' -ne '') {
+            '${{ inputs.version }}'
+          } else {
+            '0.1.0-dev'
+          }
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Host "Resolved version: $v"
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Install Inno Setup 6
+        shell: pwsh
+        run: |
+          choco install innosetup --version=6.2.2 --no-progress -y
+
+      - name: Cache prerequisite downloads
+        uses: actions/cache@v4
+        with:
+          path: installer/.cache
+          key: installer-cache-v1-${{ hashFiles('installer/build.ps1') }}
+
+      - name: Build installer + portable zip
+        shell: pwsh
+        env:
+          AUTOEDIT_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          cd installer
+          .\build.ps1 -Version $env:AUTOEDIT_VERSION
+
+      - name: Embedded-runtime smoke (CLI --help)
+        shell: pwsh
+        run: |
+          # Run the CLI launcher directly out of build/ to confirm the
+          # bundled tree boots end-to-end without going through the
+          # Inno installer (faster signal on every PR).
+          $exe = "installer\build\bin\AutoEditLite-CLI.exe"
+          if (-not (Test-Path $exe)) { throw "launcher not produced" }
+          & $exe --help
+          if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 4) {
+            # exit 4 = no API key, which is expected on CI
+            throw "launcher --help failed (exit $LASTEXITCODE)"
+          }
+
+      # Signing is a no-op when the secrets are absent — local builds
+      # and forks just publish unsigned artifacts.
+      - name: Sign artifacts (optional)
+        if: env.SIGNING_CERT_BASE64 != ''
+        shell: pwsh
+        env:
+          SIGNING_CERT_BASE64: ${{ secrets.SIGNING_CERT_BASE64 }}
+          SIGNING_CERT_PASSWORD: ${{ secrets.SIGNING_CERT_PASSWORD }}
+        run: |
+          $pfx = "$env:RUNNER_TEMP\sign.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:SIGNING_CERT_BASE64))
+          $signtool = "${env:ProgramFiles(x86)}\Windows Kits\10\bin\10.0.22621.0\x64\signtool.exe"
+          Get-ChildItem installer\dist\*.exe | ForEach-Object {
+            & $signtool sign /f $pfx /p $env:SIGNING_CERT_PASSWORD `
+                /tr http://timestamp.digicert.com /td sha256 /fd sha256 $_.FullName
+          }
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: AutoEditLite-${{ steps.version.outputs.version }}
+          path: |
+            installer/dist/AutoEditLite-Setup.exe
+            installer/dist/AutoEditLite-Portable-*.zip
+            installer/build/requirements.lock
+            installer/build/ctranslate2-resolved.txt
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            installer/dist/AutoEditLite-Setup.exe
+            installer/dist/AutoEditLite-Portable-*.zip
+          generate_release_notes: true

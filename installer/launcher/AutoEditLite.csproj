@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Windowed variant. No console flash on launch. WinForms enabled for the
+    API-key dialog and model-download progress dialog. WINDOWED define
+    activates the GUI code paths in Program.cs.
+  -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>AutoEditLite</RootNamespace>
+    <AssemblyName>AutoEditLite</AssemblyName>
+    <DefineConstants>$(DefineConstants);WINDOWED</DefineConstants>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+
+    <!-- Isolate obj/bin so the two csprojs in this folder do not collide. -->
+    <BaseIntermediateOutputPath>obj\AutoEditLite\</BaseIntermediateOutputPath>
+    <BaseOutputPath>bin\AutoEditLite\</BaseOutputPath>
+
+    <!--
+      The SDK's implicit Compile glob is rooted at the project directory.
+      Without this exclude, AutoEditLite-CLI.csproj's Compile sweep picks up
+      AutoEditLite/'s auto-generated AssemblyInfo.cs (and vice versa),
+      producing CS0579 "Duplicate TargetFrameworkAttribute" errors.
+    -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);obj\**;bin\**;publish\**</DefaultItemExcludes>
+  </PropertyGroup>
+</Project>

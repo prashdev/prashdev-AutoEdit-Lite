@@ -70,12 +70,16 @@
   }
 
   function loadSettings() {
-    // 1. Try localStorage (fastest — already synced from a previous session)
+    // 1. Try localStorage (fastest — already synced from a previous session).
+    //    Only trust the cached path if main.py is still there. Without this
+    //    a stale backendPath from a previous install would silently mask the
+    //    settings.json a fresh installer just wrote.
     try {
       var raw = localStorage.getItem("autoedit_settings_v2");
       if (raw) {
         var parsed = JSON.parse(raw);
-        if (parsed.backendPath) {
+        if (parsed.backendPath &&
+            fs.existsSync(path.join(parsed.backendPath, "main.py"))) {
           settings = parsed;
           return;
         }
@@ -87,6 +91,7 @@
       var installerFile = installerSettingsPath();
       if (fs.existsSync(installerFile)) {
         var installerRaw = fs.readFileSync(installerFile, "utf8");
+        if (installerRaw.charCodeAt(0) === 0xFEFF) installerRaw = installerRaw.slice(1); // strip BOM if any
         var installerParsed = JSON.parse(installerRaw);
         if (installerParsed.backendPath) {
           settings = installerParsed;

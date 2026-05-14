@@ -1,4 +1,5 @@
 @echo off
+setlocal
 title AutoEdit-Lite
 color 0B
 
@@ -8,10 +9,22 @@ echo   AutoEdit-Lite - AI Video Editor
 echo ============================================================
 echo.
 
+:: ── Activate venv created by install_all_windows.ps1 ──────────────────────
+:: Without this, "python main.py" below would use whichever Python is on
+:: system PATH and miss every pip dep installed into the venv. This was the
+:: #1 cause of "ModuleNotFoundError: faster_whisper" on fresh installs.
+if exist "%~dp0venv\Scripts\activate.bat" (
+    call "%~dp0venv\Scripts\activate.bat"
+) else (
+    echo   [WARN] venv not found at %~dp0venv. Using system Python.
+    echo          Run install_all_windows.bat to create the virtual environment.
+    echo.
+)
+
 :: ── Quick sanity checks ───────────────────────────────────────────────────
 python --version >nul 2>&1
 if %errorlevel% neq 0 (
-    echo   [ERROR] Python not found. Please run setup_windows.bat first.
+    echo   [ERROR] Python not found. Please run install_all_windows.bat first.
     pause & exit /b 1
 )
 ffmpeg -version >nul 2>&1

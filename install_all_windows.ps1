@@ -69,8 +69,43 @@ Write-Host "  This script will install everything automatically." -ForegroundCol
 Write-Host "  It is safe to run more than once." -ForegroundColor Gray
 Write-Host ""
 
+# ── Step 0: Check VC++ runtime (CTranslate2 needs MSVC 2015-2022) ─────────────
+# faster-whisper -> ctranslate2 links the MSVC C++ runtime. Fresh Windows
+# installs lack it and the Python import will fail with an opaque "DLL load
+# failed" message — install_all_windows.ps1 previously did NOT check for this.
+function Test-VCRedistInstalled {
+    $key = "HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64"
+    try {
+        $val = Get-ItemProperty -Path $key -Name Installed -ErrorAction Stop
+        return [int]$val.Installed -eq 1
+    } catch {
+        return $false
+    }
+}
+
+Write-Step "Step 0/9 — Checking Visual C++ runtime (required by faster-whisper)..."
+if (Test-VCRedistInstalled) {
+    Write-OK "Visual C++ 2015-2022 redistributable is installed."
+} else {
+    Write-Warn "Visual C++ redistributable is missing. Installing via winget..."
+    try {
+        winget install --id Microsoft.VCRedist.2015+.x64 `
+            --accept-source-agreements `
+            --accept-package-agreements `
+            --silent
+    } catch {
+        Write-Warn "winget install of VCRedist failed: $($_.Exception.Message)"
+    }
+    if (-not (Test-VCRedistInstalled)) {
+        Write-Warn "VC++ redistributable still not detected. faster-whisper may fail to import."
+        Write-Host "  Manual download: https://aka.ms/vs/17/release/vc_redist.x64.exe" -ForegroundColor Yellow
+    } else {
+        Write-OK "Visual C++ redistributable installed."
+    }
+}
+
 # ── Step 1: Check winget availability ─────────────────────────────────────────
-Write-Step "Step 1/8 — Checking Windows Package Manager (winget)..."
+Write-Step "Step 1/9 — Checking Windows Package Manager (winget)..."
 
 $wingetAvailable = $false
 try {
@@ -90,7 +125,7 @@ if ($wingetAvailable) {
 }
 
 # ── Step 2: Python ─────────────────────────────────────────────────────────────
-Write-Step "Step 2/8 — Checking Python..."
+Write-Step "Step 2/9 — Checking Python..."
 
 $pythonCmd = $null
 foreach ($candidate in @("python", "python3", "py")) {
@@ -160,7 +195,7 @@ if (-not $pythonCmd) {
 }
 
 # ── Step 3: FFmpeg ─────────────────────────────────────────────────────────────
-Write-Step "Step 3/8 — Checking FFmpeg..."
+Write-Step "Step 3/9 — Checking FFmpeg..."
 
 $ffmpegOk = $false
 try {
@@ -204,7 +239,7 @@ if ($ffmpegOk) {
 }
 
 # ── Step 4: Premiere Pro plugin ────────────────────────────────────────────────
-Write-Step "Step 4/8 — Installing Premiere Pro plugin..."
+Write-Step "Step 4/9 — Installing Premiere Pro plugin..."
 
 if (-not (Test-Path $pluginSrc)) {
     Write-Warn "Premiere plugin folder not found at: $pluginSrc"
@@ -221,7 +256,7 @@ if (-not (Test-Path $pluginSrc)) {
 }
 
 # ── Step 5: CEP registry key ───────────────────────────────────────────────────
-Write-Step "Step 5/8 — Setting Premiere Pro debug registry key..."
+Write-Step "Step 5/9 — Setting Premiere Pro debug registry key..."
 
 foreach ($ver in $csxsVersions) {
     $key = "HKCU:\SOFTWARE\Adobe\CSXS.$ver"
@@ -231,7 +266,7 @@ foreach ($ver in $csxsVersions) {
 }
 
 # ── Step 6: Python venv + dependencies ────────────────────────────────────────
-Write-Step "Step 6/8 — Setting up Python virtual environment and dependencies..."
+Write-Step "Step 6/9 — Setting up Python virtual environment and dependencies..."
 
 if (-not (Test-Path $reqFile)) {
     Write-Fail "requirements.txt not found at: $reqFile"
@@ -262,7 +297,7 @@ if ($LASTEXITCODE -ne 0) {
 Write-OK "All Python packages installed."
 
 # ── Step 7: CUDA / ctranslate2 compatibility ───────────────────────────────────
-Write-Step "Step 7/8 — Checking GPU / CUDA compatibility..."
+Write-Step "Step 7/9 — Checking GPU / CUDA compatibility..."
 
 # Test whether faster-whisper loads on this machine (CPU mode)
 $cudaTest = & $venvPython -c "import os; os.environ['CUDA_VISIBLE_DEVICES']='-1'; from faster_whisper import WhisperModel; print('ok')" 2>&1
@@ -280,7 +315,7 @@ if ($LASTEXITCODE -ne 0 -or "$cudaTest" -notmatch "ok") {
 }
 
 # ── Step 8: settings.json + API key ───────────────────────────────────────────
-Write-Step "Step 8/8 — Saving settings and API key..."
+Write-Step "Step 8/9 — Saving settings and API key..."
 
 # Write %APPDATA%\AutoEdit\settings.json
 if (-not (Test-Path $settingsDir)) {
@@ -333,17 +368,27 @@ if ($existingKey -and $existingKey -ne "your_key_here" -and $existingKey.StartsW
     }
 }
 
-# ── Final verification ─────────────────────────────────────────────────────────
-Write-Host ""
-Write-Host "  Running final verification..." -ForegroundColor Gray
+# ── Step 9: Final verification (matches launcher self-check) ──────────────────
+Write-Step "Step 9/9 — Verifying every dependency the launcher will need..."
 
-$verifyScript = "import os; os.environ['CUDA_VISIBLE_DEVICES']='-1'; import faster_whisper, anthropic, ffmpeg, dotenv; print('ALL_OK')"
+# Mirror the same import set the bundled-installer launcher checks at startup,
+# so source-build users get the same pre-flight signal.
+$verifyScript = @"
+import os
+os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
+import faster_whisper, ctranslate2, anthropic, ffmpeg, dotenv, opentimelineio
+print('ALL_OK')
+"@
+
 $verifyOut = & $venvPython -c $verifyScript 2>&1
 if ("$verifyOut" -match "ALL_OK") {
     Write-OK "All packages verified successfully."
 } else {
-    Write-Warn "Verification had warnings — details above."
-    Write-Warn "Try re-running this installer. If the problem persists, share the error message with the team."
+    Write-Warn "Verification failed:"
+    Write-Host $verifyOut -ForegroundColor Red
+    Write-Warn "If the error mentions 'DLL load failed' for ctranslate2, the VC++"
+    Write-Warn "redistributable installation in Step 0 may have failed silently."
+    Write-Warn "Install manually from: https://aka.ms/vs/17/release/vc_redist.x64.exe"
 }
 
 # ── Done ───────────────────────────────────────────────────────────────────────

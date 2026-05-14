@@ -14,7 +14,29 @@ An AI-powered automatic video rough-cut tool. Drop in a talking-head video (inte
 
 ---
 
-## Full Windows Setup
+## Windows Setup — Recommended
+
+**Download `AutoEditLite-Setup.exe` from the latest [Release](https://github.com/prashdev/prashdev-AutoEdit-Lite/releases) and double-click it.**
+
+The installer bundles Python, FFmpeg, every pip dependency, and the VC++
+runtime. It installs per-user (no admin prompt) into `%LocalAppData%\Programs\AutoEditLite\`,
+asks for your Anthropic API key in a wizard page, and creates a Start Menu shortcut.
+Total install size ~600 MB; the 1.5 GB Whisper model downloads on first run
+(one-time, with a progress dialog).
+
+**No-admin / corporate / RDP environments:** download `AutoEditLite-Portable-<version>.zip`
+instead, extract anywhere, and run `AutoEditLite.exe`. Identical behaviour, no installer.
+
+> **First launch:** if SmartScreen says "Windows protected your PC", click
+> *More info → Run anyway*. The installer is not code-signed yet.
+
+---
+
+## Windows Setup — From source (developers only)
+
+> Use this path only if you want to hack on the code. End users should use the
+> installer above. The source-build path requires Python and FFmpeg on your
+> system PATH.
 
 ### Step 1 — Install Python
 
