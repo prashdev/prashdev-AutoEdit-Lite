@@ -4,9 +4,38 @@ An AI-powered automatic video rough-cut tool. Drop in a talking-head video (inte
 
 ---
 
+## Project Status
+
+**Last updated: 2026-06-13**
+
+- Current implementation verification: **322 tests passed**
+- Estimated implementation progress: **95% complete; approximately 5%
+  remaining**
+- Measured progress toward 95% human-editor agreement: **Not yet measurable;
+  representative human-labelled evaluation is still required**
+- Latest setup size: **234.75 MiB**
+- Latest portable size: **315.89 MiB**
+- Large speech-model weights bundled: **No; the staged dependencies include a
+  1.19 MiB Silero VAD asset and tiny ONNX Runtime samples**
+- Markdown status coverage: **Verified across every project Markdown file**
+- Current work: **Collect, human-label, render, and evaluate at least 10
+  complete actual representative cases for each target language**
+- Current iteration steps: **Audit 100% | Markdown status 100% | Failing
+  regression 100% | Implementation 100% | Verification/rebuild/docs 100%**
+- 95% human-editor agreement: **Not yet proven; representative human-labelled
+  video evaluation is still required**
+
+Read [`PROJECT_STATUS.md`](PROJECT_STATUS.md) before starting or continuing
+work. It is the authoritative progress ledger, verification record, next-action
+list, and new-session handoff. After every meaningful completed step, update
+that ledger and every project Markdown status section so future sessions do not
+repeat work or overstate completion.
+
+---
+
 ## What This Tool Does
 
-1. **Transcribes** your video locally on your machine (no audio ever leaves your computer)
+1. **Transcribes** your video with Sarvam AI for Indian languages when `SARVAM_API_KEY` is set, otherwise falls back to local Whisper
 2. **Sends the transcript** (text only) to Claude AI, which acts as a senior video editor
 3. **Claude decides** exactly which segments to keep — removing "um", "uh", repeated takes, long pauses, and off-topic tangents
 4. **FFmpeg cuts and stitches** only the good segments into a clean output video
@@ -21,8 +50,7 @@ An AI-powered automatic video rough-cut tool. Drop in a talking-head video (inte
 The installer bundles Python, FFmpeg, every pip dependency, and the VC++
 runtime. It installs per-user (no admin prompt) into `%LocalAppData%\Programs\AutoEditLite\`,
 asks for your Anthropic API key in a wizard page, and creates a Start Menu shortcut.
-Total install size ~600 MB; the 1.5 GB Whisper model downloads on first run
-(one-time, with a progress dialog).
+The installer avoids bundled speech models so the setup stays below the 400 MB target. Whisper models download on first local-Whisper use and are cached outside the app; Sarvam AI avoids local model downloads entirely.
 
 **No-admin / corporate / RDP environments:** download `AutoEditLite-Portable-<version>.zip`
 instead, extract anywhere, and run `AutoEditLite.exe`. Identical behaviour, no installer.
@@ -82,9 +110,9 @@ In Command Prompt (inside the project folder), run:
 pip install -r requirements.txt
 ```
 
-This installs: faster-whisper (transcription), anthropic (Claude AI), ffmpeg-python, python-dotenv.
+This installs: sarvamai (Indian-language transcription), faster-whisper (offline fallback), anthropic (Claude AI), ffmpeg-python, python-dotenv.
 
-> **Note:** faster-whisper will download AI model files (300MB–1.5GB depending on which Whisper model you choose) on the **first run only**. This is normal and only happens once.
+> **Note:** faster-whisper will download AI model files (300MB-1.5GB depending on which Whisper model you choose) on the **first local-Whisper run only**. For Marathi, Hindi, and Indian English, set `SARVAM_API_KEY` to use Sarvam AI instead.
 
 ### Step 5 — Set Up Your Anthropic API Key
 
@@ -113,21 +141,196 @@ Place your video file in the `input/` folder, then run:
 python main.py --input input\video.mp4
 ```
 
-The edited video will appear in `output\edited.mp4`.
+The edited 9:16 90-second video will appear in `output\edited_90s.mp4`.
 
 ### Full Options
 
 ```
-python main.py --input input\video.mp4 --model medium --quality balanced --output output\final.mp4
+python main.py --input input\video.mp4 --language mr-IN --quality balanced --output output\edited_90s.mp4
 ```
 
 | Argument | Options | Default | What it does |
 |----------|---------|---------|--------------|
 | `--input` | any video path | (required) | Your input video |
-| `--model` | tiny, base, small, medium, large | medium | Whisper transcription model (larger = more accurate but slower) |
+| `--model` | tiny, base, small, medium, large | medium | Whisper fallback model (larger = more accurate but slower) |
 | `--quality` | light, balanced, aggressive | balanced | How aggressively Claude edits |
-| `--output` | any path | output/edited.mp4 | Where to save the result |
+| `--output` | any path | output/edited_90s.mp4 | Where to save the result |
+| `--target-duration` | seconds | 90 | Target final cut duration |
+| `--aspect-ratio` | 9:16, 16:9 | 9:16 | Output format |
+| `--platform` | reels, tiktok, shorts, general | reels | Pacing and style target |
+| `--language` | BCP-47 code | mr-IN | Sarvam-preferred language; use hi-IN or en-IN as needed |
+| `--gap-threshold` | seconds | 0.5 | Pause length treated as removable dead air |
+| `--human-decisions` | JSON path | off | Optional human labels file; adds measured keep/remove and cut-boundary agreement to `accuracy_report.json` |
 | `--dry-run` | (flag, no value) | off | Transcribe + get Claude's plan, but do NOT cut the video |
+
+FFmpeg exports are scaled and center-cropped to the requested aspect ratio
+instead of padded, so 9:16 output stays vertical without black bars.
+When word-level timestamps are available, selected ranges are snapped to spoken
+word boundaries; silence-only selected ranges are dropped so the final cut does
+not preserve dead air as a raw timestamp segment.
+Adjacent retained ranges are merged before rendering so continuous speech does
+not become an unnecessary jump cut. At real edit points, each trimmed audio
+branch is asynchronously resampled before concatenation and receives a 10 ms
+edge fade to prevent accumulated A/V drift and waveform-click artifacts.
+
+After Claude selects ranges, AutoEdit-Lite runs a deterministic editorial-score
+refinement pass to trim clearly off-topic or repeated transcript slices from
+selected spans. If the edit is under-length, it can fill toward the target with
+high-scoring, non-overlapping transcript segments. `accuracy_report.json`
+records both refined and filled segment counts.
+Near-duplicate takes are compared by clarity, speaker confidence, transcription
+confidence, and filler level so the cleaner delivery is preferred instead of
+automatically keeping the first take.
+Pause detection defaults to 0.5 seconds across both CLI and analysis entry
+points. Strong vocalized fillers are detected in English and Devanagari
+Marathi/Hindi, including tokens followed by a danda. Editorial filler scoring
+matches complete words and phrases, so clean words such as "human" and
+"likely" are not mistaken for "um" or "like", and repeated filler occurrences
+receive a stronger penalty.
+Sarvam jobs explicitly request word timestamps. Those words are split into
+editorial utterances at sentence boundaries, meaningful pauses, and a
+12-second maximum, giving keep/remove scoring practical granularity while
+preserving precise cut points. Each job uses an isolated download directory so
+an older transcript cannot be reused accidentally.
+For non-medical videos, the main topic is inferred from recurring content terms
+across the transcript rather than one-time opener words. Medical topic profiles
+require a domain-specific anchor with repeated transcript support, so an
+isolated domain tangent or generic words such as "process" and "support" do not
+incorrectly control the video's main-topic scoring.
+If Claude returns too few usable ranges, the same score-based fill pass can
+recover a first-pass story from the strongest transcript segments instead of
+failing the edit outright.
+When Claude has already selected a core story, any duration fill is scored
+against that surviving story topic rather than unrelated raw-footage tangents.
+Strong missing content is added only when it moves the selected duration closer
+to the configured target. Duration enforcement avoids removing a long weak
+segment when doing so would unnecessarily drop the story below the accepted
+minimum and a valid shorter removal exists. It also avoids removing a premise
+when that would leave a selected context-dependent conclusion without its
+antecedent.
+Repetition and false-start detection preserve high-overlap contrasts when one
+statement introduces negation, including common contractions such as "isn't".
+This prevents a corrective sentence from being removed as a duplicate and
+changing the speaker's meaning.
+When word-level probabilities are available, transcript confidence is included
+in the editorial scores so uncertain words lower clarity/speaker-confidence and
+are avoided by the score-based fallback. `accuracy_report.json` also records
+average word confidence and low-confidence segment counts. Supported
+context-dependent conclusions remain eligible for score-based filling when
+their preceding thought is selected, so fallback stories can keep a necessary
+premise and conclusion together.
+Word-timestamped subtitles include only complete words inside each retained
+range, so captions do not display words that the video cuts partway through.
+Both post-selection refinement and fallback filling avoid English, Marathi, and Hindi continuation fragments
+that begin with context-dependent phrases such as "because", "कारण", or
+"क्योंकि" when their preceding thought is not selected.
+
+### Measuring Human-Editor Agreement
+
+To measure the 95% target, pass a labelled human edit file:
+
+```
+python main.py --input input\video.mp4 --human-decisions human_labels.json
+```
+
+Supported label shapes:
+
+```
+{
+  "segments_to_keep": [{"start": 4.1, "end": 9.2}],
+  "story_meaning_preserved": true
+}
+```
+
+or:
+
+```
+{
+  "edit_decisions": [
+    {"start": 0.0, "end": 4.0, "decision": "remove"},
+    {"start": 4.0, "end": 9.0, "decision": "keep"}
+  ],
+  "story_meaning_preserved": true
+}
+```
+
+The measured result is written under `human_editor_agreement` in `accuracy_report.json`.
+Keep/remove agreement is duration-weighted over atomic timeline intervals
+formed from both the system and human boundaries. It is class-balanced so a
+system cannot score highly merely by removing almost everything, cannot omit a
+human-labelled region, and cannot change its score by splitting one decision
+into many transcript rows. Timeline gaps covered by neither source are not
+scored. Cut boundaries use one-to-one system/human matching, so duplicate
+system cuts cannot claim the same human cut twice and missed human cuts count
+against the score. Empty, malformed, or conflicting human label files are
+marked invalid.
+
+`overall_agreement` reports the numeric keep/remove and cut-boundary agreement.
+The stricter `meets_95_percent_target` flag also requires
+`story_meaning_preserved: true`, because timestamp agreement alone does not
+prove that the final 90-second story preserves the speaker's meaning.
+`edit_decisions.json` preserves each final selected range as `cut_start` and
+`cut_end`. When a cut selects only part of a transcript segment, the decision
+artifact splits that segment into explicit remove/keep/remove intervals instead
+of incorrectly assigning one decision to the entire transcript row.
+`accuracy_report.json` records duration error and whether the selected story is
+inside the configured 85%-110% target range.
+
+For a labelled evaluation set, create a manifest that points to each run's
+`edit_decisions.json` and the matching human label file:
+
+```
+{
+  "cases": [
+    {
+      "name": "ivf-video-001",
+      "system_decisions": "ivf-video-001/edit_decisions.json",
+      "human_decisions": "ivf-video-001/human_labels.json"
+    }
+  ]
+}
+```
+
+Then run:
+
+```
+python accuracy_dataset.py --manifest labelled_dataset.json --output dataset_accuracy_report.json
+```
+
+The aggregate pass/fail for the 95% target is written to
+`aggregate.meets_95_percent_target`. Dataset aggregation pools the
+duration-weighted balanced keep/remove confusion matrix and fails the target if
+any case has invalid labels, lacks a story-meaning assessment, or is judged not
+to preserve meaning.
+
+`broll_suggestions.json` includes source-video timestamps and
+edited-timeline timestamps so suggested stock footage can be placed against
+the final 90-second sequence without guessing. Unmatched general-topic speech
+uses topic-derived stock-footage search phrases instead of clinic-specific
+fallback suggestions. Multi-concept kept ranges emit separate suggestions for
+each overlapping transcript utterance instead of one broad cue at the start.
+With word timestamps, suggestions use only complete retained words and their
+exact source and edited-timeline boundaries. Negated statements use neutral
+explanatory search terms rather than affirmative promotional service visuals.
+
+### Validating Output Video
+
+Every normal FFmpeg run probes the final artifact automatically. Geometry,
+audio presence, duration, and audio/video stream-duration drift checks are
+stored under `output_validation` in `accuracy_report.json`. Drift above 100 ms
+fails validation. A damaged or unreadable export records a failed probe without
+preventing the required JSON artifacts from being written.
+The duration check enforces the same 85%-110% target range used by story
+accuracy reporting, so severely short exports cannot be marked valid.
+
+The validator can also be run separately:
+
+```
+python output_validation.py --video output\edited_90s.mp4 --target-duration 90 --aspect-ratio 9:16 --output output\output_validation_report.json
+```
+
+The report checks that the file exists, has video and audio streams, is
+1080x1920 for 9:16 output, and stays within the configured duration budget.
 
 ### Quality Modes Explained
 

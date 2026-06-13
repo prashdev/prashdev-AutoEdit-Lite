@@ -6,6 +6,7 @@ to keep. Handles retries, validation, chunking for long videos, and logging.
 """
 
 import json
+import math
 import os
 import sys
 import time
@@ -53,6 +54,36 @@ def _fmt_time(seconds: float) -> str:
 
 def _estimate_tokens(text: str) -> int:
     return len(text) // CHARS_PER_TOKEN
+
+
+def _build_editor_prompt(
+    segments: list[dict],
+    quality_mode: str,
+    prompt_template: str,
+    target_duration: int = 90,
+    aspect_ratio: str = "16:9",
+    platform: str = "general",
+) -> tuple[str, str]:
+    transcript_str = _format_transcript(segments)
+
+    from accuracy_outputs import format_editorial_scores, score_transcript_segments
+    editorial_scores = format_editorial_scores(score_transcript_segments(segments))
+
+    platform_label = _PLATFORM_LABELS.get(platform, "General")
+    platform_context = _PLATFORM_CONTEXT.get(platform, _PLATFORM_CONTEXT["general"])
+    min_duration = max(10, round(target_duration * 0.85))
+    max_duration = round(target_duration * 1.1)
+
+    prompt = prompt_template.replace("{quality_mode}", quality_mode.upper() + " MODE")
+    prompt = prompt.replace("{transcript}", transcript_str)
+    prompt = prompt.replace("{editorial_scores}", editorial_scores)
+    prompt = prompt.replace("{target_duration}", str(target_duration))
+    prompt = prompt.replace("{min_duration}", str(min_duration))
+    prompt = prompt.replace("{max_duration}", str(max_duration))
+    prompt = prompt.replace("{aspect_ratio}", aspect_ratio)
+    prompt = prompt.replace("{platform_label}", platform_label)
+    prompt = prompt.replace("{platform_context}", platform_context)
+    return prompt, transcript_str
 
 
 def _call_claude(
@@ -134,6 +165,10 @@ def _parse_and_validate_json(
         end = float(seg["end"]) + chunk_start_offset
         reason = seg.get("reason", "")
 
+        # Rule: finite, non-negative source timestamps
+        if not math.isfinite(start) or not math.isfinite(end) or start < 0.0:
+            continue
+
         # Rule: start < end
         if start >= end:
             continue
@@ -156,6 +191,8 @@ def _parse_and_validate_json(
             start = prev_end
         if start >= end:
             continue
+        if (end - start) < MIN_SEGMENT_DURATION:
+            continue
 
         importance = int(seg.get("importance", 3))
         importance = max(1, min(5, importance))   # clamp to [1, 5]
@@ -168,6 +205,382 @@ def _parse_and_validate_json(
         prev_end = end
 
     return validated
+
+
+def _snap_to_word_boundaries(
+    kept_segments: list[dict],
+    transcript_segments: list[dict],
+) -> list[dict]:
+    """Adjust selected cuts to the nearest enclosing word timestamps."""
+    words: list[dict] = []
+    for seg in transcript_segments:
+        words.extend(seg.get("words") or [])
+    if not words:
+        return [dict(seg, cut_boundary_source=seg.get("cut_boundary_source", "segment_timestamps")) for seg in kept_segments]
+
+    snapped: list[dict] = []
+    prev_end = 0.0
+    for seg in kept_segments:
+        start = float(seg["start"])
+        end = float(seg["end"])
+        overlapping = [
+            word for word in words
+            if float(word["end"]) > start and float(word["start"]) < end
+        ]
+        adjusted = dict(seg)
+        if overlapping:
+            adjusted["start"] = round(max(prev_end, float(overlapping[0]["start"])), 3)
+            adjusted["end"] = round(float(overlapping[-1]["end"]), 3)
+            adjusted["cut_boundary_source"] = "word_timestamps"
+        else:
+            continue
+        if adjusted["end"] > adjusted["start"]:
+            snapped.append(adjusted)
+            prev_end = adjusted["end"]
+
+    return snapped
+
+
+def _merge_contiguous_segments(segments: list[dict], tolerance: float = 0.001) -> list[dict]:
+    """Merge selected ranges only when no meaningful source-time gap remains."""
+    merged: list[dict] = []
+    for segment in sorted(segments, key=lambda item: float(item["start"])):
+        current = dict(segment)
+        if not merged or float(current["start"]) - float(merged[-1]["end"]) > tolerance:
+            merged.append(current)
+            continue
+
+        previous = merged[-1]
+        previous["end"] = round(max(float(previous["end"]), float(current["end"])), 3)
+        previous["importance"] = max(
+            int(previous.get("importance", 3)),
+            int(current.get("importance", 3)),
+        )
+        reasons = [
+            reason
+            for reason in (previous.get("reason", ""), current.get("reason", ""))
+            if reason
+        ]
+        previous["reason"] = "; ".join(dict.fromkeys(reasons))
+    return merged
+
+
+def _enforce_duration_budget(
+    segments: list[dict],
+    target_duration: int = 90,
+    transcript_segments: list[dict] | None = None,
+) -> list[dict]:
+    min_duration = target_duration * 0.85
+    max_duration = round(target_duration * 1.1)
+    total = sum(s["end"] - s["start"] for s in segments)
+    if total <= max_duration or not segments:
+        return segments
+
+    trimmed = list(segments)
+    while trimmed and total > max_duration:
+        removal_order = sorted(
+            trimmed,
+            key=lambda s: (s.get("importance", 3), -(s["end"] - s["start"])),
+        )
+        minimum_preserving = [
+            segment
+            for segment in removal_order
+            if total - (segment["end"] - segment["start"]) >= min_duration
+        ]
+        if transcript_segments:
+            current_orphans = _orphaned_context_indexes(trimmed, transcript_segments)
+            safe_removals = [
+                segment
+                for segment in removal_order
+                if not (
+                    _orphaned_context_indexes(
+                        [kept for kept in trimmed if kept is not segment],
+                        transcript_segments,
+                    )
+                    - current_orphans
+                )
+            ]
+            viable = [
+                segment for segment in minimum_preserving
+                if segment in safe_removals
+            ]
+        else:
+            viable = minimum_preserving
+        if not viable:
+            break
+        removed = viable[0]
+        trimmed.remove(removed)
+        total -= (removed["end"] - removed["start"])
+    trimmed.sort(key=lambda s: s["start"])
+    return trimmed
+
+
+def _overlap_seconds(a_start: float, a_end: float, b_start: float, b_end: float) -> float:
+    return max(0.0, min(a_end, b_end) - max(a_start, b_start))
+
+
+def _passes_editorial_score_gate(scores: dict, quality_mode: str) -> bool:
+    """Return False only for clear deterministic keep/remove mistakes."""
+    mode = quality_mode.lower()
+    repetition_limit = 0.85 if mode == "light" else 0.55
+    off_topic_limit = 0.95 if mode == "aggressive" else 0.90
+
+    if scores.get("repetition", 0.0) >= repetition_limit:
+        return False
+    if scores.get("transcription_confidence", 1.0) < 0.55:
+        return False
+
+    clearly_off_topic = (
+        scores.get("off_topic_drift", 0.0) >= off_topic_limit
+        and scores.get("topic_relevance", 0.0) <= 0.10
+        and scores.get("usefulness", 0.0) <= 0.25
+        and scores.get("hook_strength", 0.0) <= 0.50
+    )
+    if clearly_off_topic and mode in {"balanced", "aggressive"}:
+        return False
+
+    return True
+
+
+def _substantive_antecedent_index(
+    transcript_index: int,
+    scored_segments: list[dict],
+    quality_mode: str = "balanced",
+) -> int | None:
+    """Find the nearest prior transcript row that is viable story context."""
+    for prior_index in range(transcript_index - 1, -1, -1):
+        if _passes_editorial_score_gate(
+            scored_segments[prior_index]["scores"],
+            quality_mode,
+        ):
+            return prior_index
+    return None
+
+
+def _append_refined_run(refined: list[dict], run: dict | None, source: dict) -> None:
+    if not run:
+        return
+    if run["end"] - run["start"] < MIN_SEGMENT_DURATION:
+        return
+    refined.append({
+        "start": round(run["start"], 3),
+        "end": round(run["end"], 3),
+        "reason": source.get("reason", ""),
+        "importance": int(source.get("importance", 3)),
+        "refinement_source": "editorial_scores",
+    })
+
+
+def _refine_selected_segments_by_editorial_scores(
+    kept_segments: list[dict],
+    transcript_segments: list[dict],
+    quality_mode: str = "balanced",
+) -> list[dict]:
+    """
+    Remove clearly weak transcript slices from Claude-selected ranges.
+
+    Claude remains the primary editor. This deterministic gate catches two
+    high-impact failure modes that are visible from transcript-only signals:
+    repeated takes and selected off-topic drift around otherwise useful content.
+    """
+    if not kept_segments or not transcript_segments:
+        return kept_segments
+
+    from accuracy_outputs import score_transcript_segments
+
+    scored_segments = score_transcript_segments(transcript_segments)
+    refined: list[dict] = []
+    accepted_transcript_indexes: set[int] = set()
+
+    for selected in kept_segments:
+        selected_start = float(selected["start"])
+        selected_end = float(selected["end"])
+        matched_any = False
+        current_run: dict | None = None
+
+        for transcript_index, (transcript, scored) in enumerate(zip(transcript_segments, scored_segments)):
+            seg_start = float(transcript["start"])
+            seg_end = float(transcript["end"])
+            overlap = _overlap_seconds(selected_start, selected_end, seg_start, seg_end)
+            if overlap <= 0:
+                continue
+
+            matched_any = True
+            clip_start = max(selected_start, seg_start)
+            clip_end = min(selected_end, seg_end)
+            scores = scored["scores"]
+            antecedent_index = _substantive_antecedent_index(
+                transcript_index,
+                scored_segments,
+                quality_mode,
+            )
+            has_required_context = (
+                scores.get("context_dependency", 0.0) < 0.75
+                or antecedent_index in accepted_transcript_indexes
+            )
+            if not _passes_editorial_score_gate(scores, quality_mode) or not has_required_context:
+                _append_refined_run(refined, current_run, selected)
+                current_run = None
+                continue
+
+            accepted_transcript_indexes.add(transcript_index)
+            if current_run and clip_start <= current_run["end"] + 0.001:
+                current_run["end"] = max(current_run["end"], clip_end)
+            else:
+                _append_refined_run(refined, current_run, selected)
+                current_run = {"start": clip_start, "end": clip_end}
+
+        _append_refined_run(refined, current_run, selected)
+        if not matched_any:
+            refined.append(dict(selected))
+
+    return refined
+
+
+def _duration(segments: list[dict]) -> float:
+    return sum(float(seg["end"]) - float(seg["start"]) for seg in segments)
+
+
+def _overlaps_any(candidate: dict, segments: list[dict]) -> bool:
+    start = float(candidate["start"])
+    end = float(candidate["end"])
+    return any(
+        _overlap_seconds(start, end, float(seg["start"]), float(seg["end"])) > 0.001
+        for seg in segments
+    )
+
+
+def _orphaned_context_indexes(
+    selected_segments: list[dict],
+    transcript_segments: list[dict],
+) -> set[int]:
+    """Return selected context-dependent transcript rows without their antecedent."""
+    from accuracy_outputs import score_transcript_segments
+
+    scored = score_transcript_segments(transcript_segments)
+    orphans: set[int] = set()
+    for index, (transcript, scored_segment) in enumerate(zip(transcript_segments, scored)):
+        if not _overlaps_any(transcript, selected_segments):
+            continue
+        if scored_segment["scores"].get("context_dependency", 0.0) < 0.75:
+            continue
+        antecedent_index = _substantive_antecedent_index(index, scored)
+        if (
+            antecedent_index is None
+            or not _overlaps_any(transcript_segments[antecedent_index], selected_segments)
+        ):
+            orphans.add(index)
+    return orphans
+
+
+def _editorial_candidate_score(scores: dict) -> float:
+    positive = (
+        scores.get("topic_relevance", 0.0) * 0.30
+        + scores.get("usefulness", 0.0) * 0.22
+        + scores.get("clarity", 0.0) * 0.14
+        + scores.get("speaker_confidence", 0.0) * 0.12
+        + scores.get("uniqueness", 0.0) * 0.12
+        + scores.get("emotional_value", 0.0) * 0.10
+    )
+    penalties = (
+        scores.get("repetition", 0.0) * 0.30
+        + scores.get("filler", 0.0) * 0.20
+        + scores.get("off_topic_drift", 0.0) * 0.25
+    )
+    return max(0.0, positive - penalties)
+
+
+def _fill_duration_with_high_scoring_segments(
+    kept_segments: list[dict],
+    transcript_segments: list[dict],
+    quality_mode: str = "balanced",
+    target_duration: int = 90,
+) -> list[dict]:
+    """Fill an under-length edit with strong missing transcript segments."""
+    if not transcript_segments:
+        return kept_segments
+
+    min_duration = target_duration * 0.85
+    max_duration = target_duration * 1.10
+    current_duration = _duration(kept_segments)
+    if current_duration >= target_duration:
+        return kept_segments
+
+    from accuracy_outputs import infer_main_topic, score_transcript_segments
+
+    candidates: list[dict] = []
+    selected_topic_segments = [
+        transcript
+        for transcript in transcript_segments
+        if _overlaps_any(transcript, kept_segments)
+    ]
+    main_topic = infer_main_topic(selected_topic_segments or transcript_segments)
+    scored_transcript = score_transcript_segments(transcript_segments, main_topic=main_topic)
+    for transcript_index, (transcript, scored) in enumerate(zip(transcript_segments, scored_transcript)):
+        if _overlaps_any(transcript, kept_segments):
+            continue
+        scores = scored["scores"]
+        if not _passes_editorial_score_gate(scores, quality_mode):
+            continue
+        candidate_score = _editorial_candidate_score(scores)
+        if candidate_score < 0.45:
+            continue
+        duration = float(transcript["end"]) - float(transcript["start"])
+        if duration < MIN_SEGMENT_DURATION:
+            continue
+        candidates.append({
+            "start": round(float(transcript["start"]), 3),
+            "end": round(float(transcript["end"]), 3),
+            "score": candidate_score,
+            "transcript_index": transcript_index,
+            "context_dependent": scores.get("context_dependency", 0.0) >= 0.75,
+            "antecedent_index": _substantive_antecedent_index(
+                transcript_index,
+                scored_transcript,
+                quality_mode,
+            ),
+        })
+
+    filled = [dict(seg) for seg in kept_segments]
+    pending = sorted(candidates, key=lambda item: (-item["score"], item["start"]))
+    while pending and current_duration < target_duration:
+        deferred: list[dict] = []
+        added_any = False
+        for candidate in pending:
+            transcript_index = candidate["transcript_index"]
+            if candidate["context_dependent"] and (
+                candidate["antecedent_index"] is None
+                or not _overlaps_any(
+                    transcript_segments[candidate["antecedent_index"]],
+                    filled,
+                )
+            ):
+                deferred.append(candidate)
+                continue
+
+            candidate_duration = candidate["end"] - candidate["start"]
+            next_duration = current_duration + candidate_duration
+            if next_duration > max_duration:
+                continue
+            if abs(target_duration - next_duration) >= abs(target_duration - current_duration):
+                continue
+            filled.append({
+                "start": candidate["start"],
+                "end": candidate["end"],
+                "reason": "editorial score fill: relevant missing context",
+                "importance": 4 if candidate["score"] >= 0.60 else 3,
+                "refinement_source": "editorial_score_fill",
+            })
+            current_duration = next_duration
+            added_any = True
+            if current_duration >= target_duration:
+                break
+        if not added_any:
+            break
+        pending = deferred
+
+    filled.sort(key=lambda seg: seg["start"])
+    return filled
 
 
 _PLATFORM_CONTEXT = {
@@ -218,7 +631,7 @@ def _analyze_chunk(
     target_duration: int = 90,
     aspect_ratio: str = "16:9",
     platform: str = "general",
-    gap_threshold: float = 0.8,
+    gap_threshold: float = 0.5,
 ) -> list[dict]:
     """Run one Claude request for a single transcript chunk. Retries up to 3 times."""
     # Rule-based filler pre-filter: strip obvious fillers before sending to Claude.
@@ -240,21 +653,14 @@ def _analyze_chunk(
         except Exception as e:
             print(f"  [WARNING] Filler pre-filter failed: {e} - sending full transcript to Claude")
 
-    transcript_str = _format_transcript(segments)
-
-    platform_label = _PLATFORM_LABELS.get(platform, "General")
-    platform_context = _PLATFORM_CONTEXT.get(platform, _PLATFORM_CONTEXT["general"])
-    min_duration = max(10, round(target_duration * 0.85))
-    max_duration = round(target_duration * 1.1)
-
-    prompt = prompt_template.replace("{quality_mode}", quality_mode.upper() + " MODE")
-    prompt = prompt.replace("{transcript}", transcript_str)
-    prompt = prompt.replace("{target_duration}", str(target_duration))
-    prompt = prompt.replace("{min_duration}", str(min_duration))
-    prompt = prompt.replace("{max_duration}", str(max_duration))
-    prompt = prompt.replace("{aspect_ratio}", aspect_ratio)
-    prompt = prompt.replace("{platform_label}", platform_label)
-    prompt = prompt.replace("{platform_context}", platform_context)
+    prompt, transcript_str = _build_editor_prompt(
+        segments=segments,
+        quality_mode=quality_mode,
+        prompt_template=prompt_template,
+        target_duration=target_duration,
+        aspect_ratio=aspect_ratio,
+        platform=platform,
+    )
 
     raw_response = ""
     extra_prefix = ""
@@ -270,17 +676,23 @@ def _analyze_chunk(
             validated = _parse_and_validate_json(raw_response, video_duration, chunk_start_offset)
 
             # Enforce duration budget — remove lowest-importance segments first
-            min_duration = max(10, round(target_duration * 0.85))
+            n_before = len(validated)
+            absolute_transcript = [
+                {
+                    **segment,
+                    "start": float(segment["start"]) + chunk_start_offset,
+                    "end": float(segment["end"]) + chunk_start_offset,
+                }
+                for segment in segments
+            ]
+            validated = _enforce_duration_budget(
+                validated,
+                target_duration=target_duration,
+                transcript_segments=absolute_transcript,
+            )
             max_duration = round(target_duration * 1.1)
             total = sum(s["end"] - s["start"] for s in validated)
-            if total > max_duration and validated:
-                n_before = len(validated)
-                # Sort: lowest importance first; ties broken by shortest segment first
-                validated.sort(key=lambda s: (s.get("importance", 3), -(s["end"] - s["start"])))
-                while validated and total > max_duration:
-                    removed = validated.pop(0)
-                    total -= (removed["end"] - removed["start"])
-                validated.sort(key=lambda s: s["start"])   # restore chronological order
+            if len(validated) < n_before:
                 print(
                     f"  [Duration enforcement] Trimmed to {total:.1f}s "
                     f"(removed {n_before - len(validated)} low-importance segment(s), "
@@ -315,7 +727,7 @@ def analyze_transcript(
     platform: str = "general",
     logs_dir: str = "logs",
     prompts_dir: str = "prompts",
-    gap_threshold: float = 0.8,
+    gap_threshold: float = 0.5,
 ) -> list[dict]:
     """
     Send the transcript to Claude and return a validated list of segments to keep.
@@ -389,6 +801,25 @@ def analyze_transcript(
     # so main.py can always reference logs/claude_raw.txt and logs/claude_clean.json
     _merge_logs(logs_path)
 
+    kept_segments = _refine_selected_segments_by_editorial_scores(
+        kept_segments=kept_segments,
+        transcript_segments=segments,
+        quality_mode=quality_mode,
+    )
+    kept_segments = _fill_duration_with_high_scoring_segments(
+        kept_segments=kept_segments,
+        transcript_segments=segments,
+        quality_mode=quality_mode,
+        target_duration=target_duration,
+    )
+    kept_segments = _snap_to_word_boundaries(kept_segments, segments)
+    kept_segments = _enforce_duration_budget(
+        kept_segments,
+        target_duration=target_duration,
+        transcript_segments=segments,
+    )
+    kept_segments = _merge_contiguous_segments(kept_segments)
+
     # Save final validated segments
     final_log = logs_path / "final_segments.json"
     with open(final_log, "w", encoding="utf-8") as f:
@@ -408,7 +839,7 @@ def _analyze_in_chunks(
     target_duration: int = 90,
     aspect_ratio: str = "16:9",
     platform: str = "general",
-    gap_threshold: float = 0.8,
+    gap_threshold: float = 0.5,
 ) -> list[dict]:
     """Split segments into 10-minute chunks and process each separately."""
     chunks: list[tuple[float, list[dict]]] = []

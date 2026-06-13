@@ -16,7 +16,7 @@
 #define AppPublisher  "prashdev"
 #define AppVersion    GetEnv("AUTOEDIT_VERSION")
 #if AppVersion == ""
-  #define AppVersion  "0.1.0-dev"
+  #define AppVersion  "0.1.0.0"
 #endif
 #define AppExe        "AutoEditLite.exe"
 #define AppCliExe     "AutoEditLite-CLI.exe"

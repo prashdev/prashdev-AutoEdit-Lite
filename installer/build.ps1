@@ -12,8 +12,8 @@
     download is pinned by URL + (optional) SHA256.
 
 .PARAMETER Version
-    Version string baked into the installer (e.g. "0.2.0"). Defaults to
-    AUTOEDIT_VERSION env var, then "0.1.0-dev".
+    Numeric version string baked into the installer (e.g. "0.2.0.0"). Defaults
+    to AUTOEDIT_VERSION env var, then "0.1.0.0".
 
 .PARAMETER SkipPortable
     Skip producing the portable zip (faster local iteration).
@@ -27,7 +27,7 @@
 
 [CmdletBinding()]
 param(
-    [string]$Version = $(if ($env:AUTOEDIT_VERSION) { $env:AUTOEDIT_VERSION } else { '0.1.0-dev' }),
+    [string]$Version = $(if ($env:AUTOEDIT_VERSION) { $env:AUTOEDIT_VERSION } else { '0.1.0.0' }),
     [switch]$SkipPortable
 )
 
@@ -41,6 +41,7 @@ $buildDir     = Join-Path $installerDir 'build'
 $distDir      = Join-Path $installerDir 'dist'
 $cacheDir     = Join-Path $installerDir '.cache'
 $launcherDir  = Join-Path $installerDir 'launcher'
+$MaxArtifactMB = 400
 
 # ── Pinned downloads ────────────────────────────────────────────────────────
 $PythonEmbedUrl = 'https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip'
@@ -58,6 +59,16 @@ $env:AUTOEDIT_VERSION = $Version
 function Write-Step { param([string]$m) Write-Host "`n==> $m" -ForegroundColor Cyan }
 function Write-OK   { param([string]$m) Write-Host "    $m"   -ForegroundColor Green }
 function Fail       { param([string]$m) Write-Host "`nFAIL: $m" -ForegroundColor Red; exit 1 }
+
+function Assert-ArtifactUnderLimit {
+    param([string]$Path)
+    if (-not (Test-Path $Path)) { Fail "Expected artifact not found: $Path" }
+    $sizeMB = [math]::Round((Get-Item $Path).Length / 1MB, 1)
+    if ($sizeMB -gt $MaxArtifactMB) {
+        Fail "$(Split-Path $Path -Leaf) is $sizeMB MB, above the $MaxArtifactMB MB limit. Do not bundle large speech models."
+    }
+    Write-OK "$(Split-Path $Path -Leaf) size OK ($sizeMB MB <= $MaxArtifactMB MB)"
+}
 
 function Get-Cached {
     param([string]$Url, [string]$FileName)
@@ -170,7 +181,8 @@ Write-Step "Staging application source"
 $appDst = Join-Path $buildDir 'app'
 New-Item -ItemType Directory -Path $appDst -Force | Out-Null
 $pyFiles = @('main.py','transcribe.py','analyze.py','editor.py','captions.py',
-             'filler_detector.py','losslesscut_export.py','xml_export.py')
+             'filler_detector.py','losslesscut_export.py','xml_export.py',
+             'accuracy_outputs.py','accuracy_dataset.py','output_validation.py')
 foreach ($f in $pyFiles) {
     Copy-Item -Path (Join-Path $repoRoot $f) -Destination $appDst -ErrorAction Stop
 }
@@ -297,6 +309,8 @@ Write-OK "iscc: $iscc"
 & $iscc (Join-Path $installerDir 'AutoEditLite.iss')
 if ($LASTEXITCODE -ne 0) { Fail "Inno Setup failed" }
 Write-OK "AutoEditLite-Setup.exe -> $distDir"
+$setupExe = Join-Path $distDir 'AutoEditLite-Setup.exe'
+Assert-ArtifactUnderLimit -Path $setupExe
 
 # ── Step 9: Portable zip ────────────────────────────────────────────────────
 if (-not $SkipPortable) {
@@ -313,6 +327,7 @@ if (-not $SkipPortable) {
     if (Test-Path $portableZip) { Remove-Item $portableZip -Force }
     Compress-Archive -Path "$portableTree\*" -DestinationPath $portableZip -CompressionLevel Optimal
     Write-OK "AutoEditLite-Portable-$Version.zip -> $distDir"
+    Assert-ArtifactUnderLimit -Path $portableZip
 }
 
 Write-Host "`nBuild succeeded." -ForegroundColor Green

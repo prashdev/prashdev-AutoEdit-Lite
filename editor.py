@@ -16,6 +16,9 @@ import sys
 from pathlib import Path
 
 
+AUDIO_EDGE_FADE_SECONDS = 0.01
+
+
 def _has_audio_stream(video_path: Path) -> bool:
     """Return True if the video file contains at least one audio stream."""
     cmd = [
@@ -47,11 +50,20 @@ def _get_video_duration(video_path: Path) -> float:
         return 0.0
 
 
+def _target_dimensions(aspect_ratio: str) -> tuple[int, int]:
+    if aspect_ratio == "9:16":
+        return 1080, 1920
+    if aspect_ratio == "16:9":
+        return 1920, 1080
+    raise ValueError(f"Unsupported aspect ratio: {aspect_ratio}")
+
+
 def cut_video(
     input_path: str,
     segments: list[dict],
     output_path: str,
     dry_run: bool = False,
+    aspect_ratio: str = "9:16",
 ) -> float:
     """
     Cut the input video to the given segments and stitch into output_path.
@@ -59,7 +71,8 @@ def cut_video(
     Uses FFmpeg's concat filter for frame-accurate cuts with re-encoding.
     Video: libx264, preset fast, CRF 20 (good quality, reasonable speed)
     Audio: aac, 192k bitrate
-    Both streams are synced with -async 1.
+    Each trimmed audio segment is asynchronously resampled before concat so
+    small timestamp discontinuities do not accumulate into A/V drift.
 
     Parameters
     ----------
@@ -71,6 +84,10 @@ def cut_video(
         Path for the output edited video.
     dry_run : bool
         If True, print the FFmpeg command but do not execute it.
+    aspect_ratio : str
+        Output aspect ratio. "9:16" produces 1080x1920 vertical output;
+        "16:9" produces 1920x1080 horizontal output. Uses center crop
+        after scaling, never padding, to avoid black bars.
 
     Returns
     -------
@@ -87,6 +104,7 @@ def cut_video(
 
     n = len(segments)
     has_audio = _has_audio_stream(input_path)
+    target_width, target_height = _target_dimensions(aspect_ratio)
     if not has_audio:
         print("  [NOTE] Source video has no audio stream - output will be video-only.")
 
@@ -103,8 +121,13 @@ def cut_video(
             f"[0:v]trim=start={start}:end={end},setpts=PTS-STARTPTS[v{i}]"
         )
         if has_audio:
+            duration = max(0.0, float(end) - float(start))
+            fade_out_start = max(0.0, duration - AUDIO_EDGE_FADE_SECONDS)
             filter_parts.append(
-                f"[0:a]atrim=start={start}:end={end},asetpts=PTS-STARTPTS[a{i}]"
+                f"[0:a]atrim=start={start}:end={end},asetpts=PTS-STARTPTS,"
+                f"aresample=async=1:first_pts=0,"
+                f"afade=t=in:st=0:d={AUDIO_EDGE_FADE_SECONDS},"
+                f"afade=t=out:st={fade_out_start:g}:d={AUDIO_EDGE_FADE_SECONDS}[a{i}]"
             )
             stream_labels.append(f"[v{i}][a{i}]")
         else:
@@ -112,9 +135,13 @@ def cut_video(
 
     concat_inputs = "".join(stream_labels)
     if has_audio:
-        filter_parts.append(f"{concat_inputs}concat=n={n}:v=1:a=1[outv][outa]")
+        filter_parts.append(f"{concat_inputs}concat=n={n}:v=1:a=1[joinedv][outa]")
     else:
-        filter_parts.append(f"{concat_inputs}concat=n={n}:v=1:a=0[outv]")
+        filter_parts.append(f"{concat_inputs}concat=n={n}:v=1:a=0[joinedv]")
+    filter_parts.append(
+        f"[joinedv]scale={target_width}:{target_height}:force_original_aspect_ratio=increase,"
+        f"crop={target_width}:{target_height},setsar=1[outv]"
+    )
 
     filter_complex = ";".join(filter_parts)
 
@@ -137,7 +164,6 @@ def cut_video(
             "-map", "[outa]",
             "-c:a", "aac",
             "-b:a", "192k",
-            "-async", "1",
             str(output_path),
         ]
 

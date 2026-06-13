@@ -9,28 +9,33 @@
 
   <!-- ── SCREEN 1: First-time setup ───────────────────────────────── -->
   <div id="screen-setup" class="screen">
-    <div class="setup-icon">✂</div>
-    <h2>Welcome to AutoEdit</h2>
-    <p class="setup-desc">
-      Point AutoEdit to your project folder so it can find the AI engine.
-    </p>
-    <button id="btn-choose-backend" class="btn btn-primary">
-      Choose autoedit-lite folder
-    </button>
+    <div class="setup-card glass glass-bracket">
+      <div class="bracket-bl"></div>
+      <div class="bracket-br"></div>
 
-    <!-- Shown when folder dialog fails (e.g. on Windows with unsigned extension) -->
-    <div id="setup-manual" class="setup-manual hidden">
-      <p id="setup-error" class="setup-error"></p>
-      <p class="setup-manual-label">Paste the path to your autoedit-lite folder:</p>
-      <div class="setup-path-row">
-        <input id="input-manual-path" class="setup-path-input" type="text"
-               placeholder="e.g. C:\Users\Aditya\autoedit-lite" spellcheck="false"/>
-        <button id="btn-set-path" class="btn btn-small">Set</button>
+      <div class="setup-icon">✂</div>
+      <h2>Welcome to AutoEdit</h2>
+      <p class="setup-desc">
+        Point AutoEdit to your project folder so it can find the AI engine.
+      </p>
+      <button id="btn-choose-backend" class="btn btn-primary">
+        Choose autoedit-lite folder
+      </button>
+
+      <!-- Shown when folder dialog fails (e.g. on Windows with unsigned extension) -->
+      <div id="setup-manual" class="setup-manual hidden">
+        <p id="setup-error" class="setup-error"></p>
+        <p class="setup-manual-label">Paste the path to your autoedit-lite folder:</p>
+        <div class="setup-path-row">
+          <input id="input-manual-path" class="setup-path-input" type="text"
+                 placeholder="e.g. C:\Users\Aditya\autoedit-lite" spellcheck="false"/>
+          <button id="btn-set-path" class="btn btn-small">Set</button>
+        </div>
+        <p id="path-error" class="path-error hidden">That folder doesn't contain main.py — check the path.</p>
       </div>
-      <p id="path-error" class="path-error hidden">That folder doesn't contain main.py — check the path.</p>
-    </div>
 
-    <p class="setup-hint">Select the folder that contains <code>main.py</code></p>
+      <p class="setup-hint">Select the folder that contains <code>main.py</code></p>
+    </div>
   </div>
 
   <!-- ── SCREEN 2: Main UI ─────────────────────────────────────────── -->
@@ -214,6 +219,36 @@
       </button>
     </div>
 
+  </div>
+
+  <!-- Sparkle decoration -->
+  <div class="sparkle">✦</div>
+
+  <!-- ── Studio Model upgrade overlay (first-launch only) ──────────────── -->
+  <div id="model-upgrade-overlay" class="overlay hidden">
+    <div class="overlay-card glass">
+      <div class="overlay-icon">⭐</div>
+      <h2 class="overlay-title">Studio Transcription Model</h2>
+      <p class="overlay-desc">Recommended for higher-quality transcription on:</p>
+      <ul class="overlay-list">
+        <li>Podcasts &amp; interviews</li>
+        <li>Accented or non-native English</li>
+        <li>Noisy or multi-speaker audio</li>
+      </ul>
+      <p class="overlay-size">One-time download • ~1.5 GB</p>
+
+      <div id="model-upgrade-progress" class="hidden">
+        <div class="progress-bar-marquee"></div>
+        <p class="overlay-progress-text">Downloading… please don't close Premiere.</p>
+      </div>
+
+      <p id="model-upgrade-error" class="overlay-error hidden"></p>
+
+      <div id="model-upgrade-actions" class="overlay-actions">
+        <button id="btn-download-medium" class="btn btn-primary">Download Now</button>
+        <button id="btn-skip-medium" class="btn btn-secondary">Skip for now</button>
+      </div>
+    </div>
   </div>
 
   <script src="CSInterface.js"></script>

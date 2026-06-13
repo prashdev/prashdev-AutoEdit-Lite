@@ -25,6 +25,41 @@ def _seconds_to_srt_time(seconds: float) -> str:
     return f"{hours:02d}:{mins:02d}:{secs:02d},{ms:03d}"
 
 
+def _clip_transcript_text(
+    transcript_segment: dict,
+    start: float,
+    end: float,
+) -> tuple[float, float, str] | None:
+    words = transcript_segment.get("words") or []
+    if words:
+        clipped_words = [
+            word for word in words
+            if float(word["start"]) >= start - 0.001
+            and float(word["end"]) <= end + 0.001
+        ]
+        if not clipped_words:
+            return None
+        clipped_start = float(clipped_words[0]["start"])
+        clipped_end = float(clipped_words[-1]["end"])
+        text = " ".join(
+            word["word"].strip()
+            for word in clipped_words
+            if word.get("word", "").strip()
+        )
+        if clipped_end > clipped_start and text:
+            return clipped_start, clipped_end, text
+        return None
+
+    text = transcript_segment.get("text", "").strip()
+    if not text:
+        return None
+    clipped_start = max(float(transcript_segment["start"]), start)
+    clipped_end = min(float(transcript_segment["end"]), end)
+    if clipped_end > clipped_start:
+        return clipped_start, clipped_end, text
+    return None
+
+
 def generate_srt(
     transcript_segments: list[dict],
     kept_segments: list[dict],
@@ -56,14 +91,14 @@ def generate_srt(
         seg_end = kept["end"]
         seg_duration = seg_end - seg_start
 
-        # Find all transcript lines that START within this kept segment.
-        # Requiring t["start"] >= seg_start (with 0.1s grace) prevents
-        # text from cut footage bleeding into the first subtitle entry.
+        # Find all transcript lines that overlap this kept segment. Word-level
+        # clipping below prevents cut text from bleeding into subtitles when
+        # the kept segment starts inside a longer transcript segment.
         matching: list[dict] = []
         for t in transcript_segments:
             overlap_start = max(t["start"], seg_start)
             overlap_end = min(t["end"], seg_end)
-            if t["start"] >= seg_start - 0.1 and overlap_end > overlap_start and t["text"].strip():
+            if overlap_end > overlap_start and t["text"].strip():
                 matching.append(t)
 
         if not matching:
@@ -73,16 +108,17 @@ def generate_srt(
 
         # Re-timestamp each matching transcript line relative to output timeline
         for t in matching:
-            # Clamp to the kept segment boundaries
-            clamped_start = max(t["start"], seg_start)
-            clamped_end = min(t["end"], seg_end)
+            clipped = _clip_transcript_text(t, seg_start, seg_end)
+            if not clipped:
+                continue
+            clamped_start, clamped_end, text = clipped
 
             # Convert to output video time
             out_start = output_time_offset + (clamped_start - seg_start)
             out_end = output_time_offset + (clamped_end - seg_start)
 
             if out_end > out_start:
-                srt_entries.append((out_start, out_end, t["text"].strip()))
+                srt_entries.append((out_start, out_end, text))
 
         output_time_offset += seg_duration
 

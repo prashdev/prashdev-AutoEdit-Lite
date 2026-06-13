@@ -10,6 +10,34 @@ pre-resolved pip dependencies, FFmpeg, and the VC++ redistributable —
 so a brand-new Windows install with no Python, no FFmpeg, no internet for
 pip, and no admin rights still ends up with a working tool.
 
+## Project Status
+
+**Last updated: 2026-06-13**
+
+- Latest installer build: **Succeeded**
+- Estimated implementation progress: **95% complete; approximately 5%
+  remaining**
+- Measured progress toward 95% human-editor agreement: **Not yet measurable;
+  representative human-labelled evaluation is still required**
+- `dist\AutoEditLite-Setup.exe`: **234.75 MiB**
+- `dist\AutoEditLite-Portable-0.2.0.zip`: **315.89 MiB**
+- Both artifacts are below the **400 MiB** limit.
+- Staged model-asset audit: **No Whisper or other large speech-model bundle;
+  dependency assets include a 1.19 MiB Silero VAD model and tiny ONNX Runtime
+  samples**
+- Embedded CLI smoke test: **Passed**
+- Staged shipped-source hashes: **Match repository source**
+- Markdown status coverage: **Verified across every project Markdown file**
+- Current work: **Collect, human-label, render, and evaluate at least 10
+  complete actual representative cases for each target language**
+- Current iteration steps: **Audit 100% | Markdown status 100% | Failing
+  regression 100% | Implementation 100% | Verification/rebuild/docs 100%**
+
+Read [`..\PROJECT_STATUS.md`](../PROJECT_STATUS.md) before rebuilding. After
+every meaningful completed project step, update the authoritative ledger and
+this section. When a build occurs, also refresh artifact sizes and audit
+evidence.
+
 ## Layout
 
 ```

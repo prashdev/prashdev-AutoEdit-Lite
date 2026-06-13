@@ -281,17 +281,15 @@ def export_premiere_xml(
     video_track = otio.schema.Track(name="Video 1", kind=otio.schema.TrackKind.Video)
     timeline.tracks.append(video_track)
 
-    # Create one audio track per channel (A1 + A2 for stereo, just A1 for mono).
-    # This matches how Premiere Pro natively handles multi-channel media and
-    # prevents "Cannot Link Media" errors caused by channel-count mismatches.
+    # FCP7 XML expects one sequence audio track per source channel.
     audio_tracks = []
-    for i in range(max(1, num_channels)):
-        t = otio.schema.Track(
-            name=f"Audio {i + 1}",
+    for channel_index in range(max(1, num_channels)):
+        audio_track = otio.schema.Track(
+            name=f"Audio {channel_index + 1}",
             kind=otio.schema.TrackKind.Audio,
         )
-        timeline.tracks.append(t)
-        audio_tracks.append(t)
+        timeline.tracks.append(audio_track)
+        audio_tracks.append(audio_track)
 
     abs_path = str(Path(input_video_path).resolve())
     abs_posix = Path(abs_path).as_posix()
@@ -324,8 +322,8 @@ def export_premiere_xml(
             media_reference=media_ref,
             source_range=source_range,
         ))
-        for at in audio_tracks:
-            at.append(otio.schema.Clip(
+        for audio_track in audio_tracks:
+            audio_track.append(otio.schema.Clip(
                 name=label,
                 media_reference=media_ref,
                 source_range=source_range,

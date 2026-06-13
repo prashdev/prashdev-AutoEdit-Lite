@@ -58,6 +58,14 @@
   var losslesscutHint = document.getElementById("losslesscut-hint");
   var btnReset        = document.getElementById("btn-reset");
 
+  // Studio Model upgrade overlay (shown first-launch when "medium" isn't cached)
+  var modelUpgradeOverlay  = document.getElementById("model-upgrade-overlay");
+  var modelUpgradeActions  = document.getElementById("model-upgrade-actions");
+  var modelUpgradeProgress = document.getElementById("model-upgrade-progress");
+  var modelUpgradeError    = document.getElementById("model-upgrade-error");
+  var btnDownloadMedium    = document.getElementById("btn-download-medium");
+  var btnSkipMedium        = document.getElementById("btn-skip-medium");
+
   var videoPath = "";
 
   // ── Settings ───────────────────────────────────────────────────────────
@@ -134,9 +142,121 @@
               fs.existsSync(path.join(settings.backendPath, "main.py")));
   }
 
+  // ── Whisper model availability ─────────────────────────────────────────
+  // Mirrors the HF_HOME the launcher + spawn-env code point at, so the
+  // panel and Python agree on where models live.
+  function hfHome() {
+    if (process.env.HF_HOME) return process.env.HF_HOME;
+    if (os.platform() === "win32") {
+      var appData = process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming");
+      return path.join(appData, "AutoEditLite", "models");
+    }
+    return path.join(os.homedir(), "Library", "Application Support", "AutoEditLite", "models");
+  }
+  function modelIsCached(size) {
+    var dir = path.join(hfHome(), "hub", "models--Systran--faster-whisper-" + size);
+    if (!fs.existsSync(dir)) return false;
+    // The cache dir can exist as a stub with no snapshots if an earlier
+    // download was interrupted. Require at least one snapshot subdir.
+    try {
+      var snaps = path.join(dir, "snapshots");
+      return fs.existsSync(snaps) && fs.readdirSync(snaps).length > 0;
+    } catch (e) { return false; }
+  }
+
+  // Pick the best available cached model as the dropdown default.
+  // Order: medium (Studio) > base (bundled). If neither cached, leave the
+  // HTML default. This is the "DEFAULT_MODEL = medium forever once
+  // downloaded" behaviour from the architecture brief.
+  function setBestDefaultModel() {
+    if (!selectModel) return;
+    if (modelIsCached("medium")) {
+      selectModel.value = "medium";
+    } else if (modelIsCached("base")) {
+      selectModel.value = "base";
+    }
+  }
+
+  // First-launch prompt: offer the Studio Model once. Decision is sticky.
+  function maybeOfferStudioModel() {
+    var decision = localStorage.getItem("autoedit_studio_model_decision");
+    if (decision === "downloaded" || decision === "skipped") return;
+    if (modelIsCached("medium")) {
+      localStorage.setItem("autoedit_studio_model_decision", "downloaded");
+      return;
+    }
+    modelUpgradeOverlay.classList.remove("hidden");
+  }
+
   // ── Init ───────────────────────────────────────────────────────────────
   loadSettings();
   isConfigured() ? showMain() : showSetup();
+  if (isConfigured()) {
+    setBestDefaultModel();
+    maybeOfferStudioModel();
+  }
+
+  // ── Studio Model upgrade overlay handlers ──────────────────────────────
+  if (btnDownloadMedium) {
+    btnDownloadMedium.addEventListener("click", function () {
+      modelUpgradeError.classList.add("hidden");
+      modelUpgradeError.textContent = "";
+      modelUpgradeActions.classList.add("hidden");
+      modelUpgradeProgress.classList.remove("hidden");
+
+      var python = settings.pythonPath || detectPython();
+      var childEnv = Object.assign({}, process.env);
+      childEnv.HF_HOME = hfHome();
+      childEnv.HF_HUB_DISABLE_SYMLINKS_WARNING = "1";
+
+      // Forward the bundled ffmpeg dir to PATH as well, in case the
+      // download path ever needs subprocess tools (defense in depth).
+      try {
+        var installRoot  = path.dirname(settings.backendPath);
+        var bundledFfBin = path.join(installRoot, "ff", "bin");
+        if (fs.existsSync(path.join(bundledFfBin, os.platform() === "win32" ? "ffmpeg.exe" : "ffmpeg"))) {
+          var pathKey = childEnv.PATH ? "PATH" : (childEnv.Path ? "Path" : "PATH");
+          childEnv[pathKey] = bundledFfBin + path.delimiter + (childEnv[pathKey] || "");
+        }
+      } catch (e) {}
+
+      var script =
+        "from faster_whisper import WhisperModel; " +
+        "WhisperModel('medium', device='cpu', compute_type='int8'); " +
+        "print('STUDIO_OK')";
+
+      var proc = child_process.spawn(python, ["-c", script], { env: childEnv });
+      var stderr = "";
+      proc.stderr.on("data", function (d) { stderr += d.toString(); });
+      proc.on("close", function (code) {
+        if (code === 0 && modelIsCached("medium")) {
+          localStorage.setItem("autoedit_studio_model_decision", "downloaded");
+          setBestDefaultModel();
+          modelUpgradeOverlay.classList.add("hidden");
+        } else {
+          modelUpgradeProgress.classList.add("hidden");
+          modelUpgradeActions.classList.remove("hidden");
+          modelUpgradeError.textContent =
+            "Download failed. Check your internet connection and try again.";
+          modelUpgradeError.classList.remove("hidden");
+        }
+      });
+      proc.on("error", function (err) {
+        modelUpgradeProgress.classList.add("hidden");
+        modelUpgradeActions.classList.remove("hidden");
+        modelUpgradeError.textContent = "Could not start downloader: " + err.message;
+        modelUpgradeError.classList.remove("hidden");
+      });
+    });
+  }
+
+  if (btnSkipMedium) {
+    btnSkipMedium.addEventListener("click", function () {
+      localStorage.setItem("autoedit_studio_model_decision", "skipped");
+      modelUpgradeOverlay.classList.add("hidden");
+      setBestDefaultModel();
+    });
+  }
 
   // ── Setup — folder dialog (with graceful fallback) ─────────────────────
   btnChoose.addEventListener("click", function () {
@@ -249,9 +369,33 @@
       "--output",          path.join(outputDir, videoBase + "_autoedit.mp4"),
     ];
 
+    // If the bundled installer is in use, prepend its ff\bin to PATH and
+    // redirect the HuggingFace cache into the per-user AutoEditLite folder.
+    // Install layout: {installRoot}\app\main.py and {installRoot}\ff\bin\.
+    // Without this, panel-spawned Python on a clean Windows box can't find
+    // ffmpeg/ffprobe and crashes at the start of transcription.
+    var childEnv = Object.assign({}, process.env);
+    try {
+      var installRoot   = path.dirname(settings.backendPath);
+      var bundledFfBin  = path.join(installRoot, "ff", "bin");
+      var bundledFfmpeg = path.join(bundledFfBin, os.platform() === "win32" ? "ffmpeg.exe" : "ffmpeg");
+      if (fs.existsSync(bundledFfmpeg)) {
+        var pathKey = childEnv.PATH ? "PATH" : (childEnv.Path ? "Path" : "PATH");
+        childEnv[pathKey] = bundledFfBin + path.delimiter + (childEnv[pathKey] || "");
+      }
+      // Co-locate HF model cache with the rest of our per-user state so it
+      // survives uninstall and doesn't pollute ~/.cache/huggingface.
+      if (os.platform() === "win32" && process.env.APPDATA) {
+        childEnv.HF_HOME = path.join(process.env.APPDATA, "AutoEditLite", "models");
+      }
+      // Silence the cosmetic symlink warning HF emits on Windows when developer
+      // mode is off — it's not actionable and looks alarming in the panel log.
+      childEnv.HF_HUB_DISABLE_SYMLINKS_WARNING = "1";
+    } catch (e) {}
+
     startRun();
 
-    var proc = child_process.spawn(python, args, { cwd: settings.backendPath });
+    var proc = child_process.spawn(python, args, { cwd: settings.backendPath, env: childEnv });
 
     proc.stdout.on("data", function (data) {
       var text = data.toString();

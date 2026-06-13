@@ -11,6 +11,8 @@ Usage:
 """
 
 import argparse
+import json
+import os
 import shutil
 import subprocess
 import sys
@@ -31,11 +33,13 @@ VALID_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm"}
 # ── Defaults ──────────────────────────────────────────────────────────────
 DEFAULT_MODEL = "medium"
 DEFAULT_QUALITY = "balanced"
-DEFAULT_OUTPUT = "output/edited.mp4"
+DEFAULT_OUTPUT = "output/edited_90s.mp4"
 DEFAULT_MODE = "ffmpeg"
 DEFAULT_TARGET_DURATION = 90      # seconds
-DEFAULT_ASPECT_RATIO = "16:9"
-DEFAULT_PLATFORM = "general"
+DEFAULT_ASPECT_RATIO = "9:16"
+DEFAULT_PLATFORM = "reels"
+DEFAULT_LANGUAGE = "mr-IN"
+DEFAULT_GAP_THRESHOLD = 0.5
 
 
 def _get_video_duration_seconds(path: Path) -> float:
@@ -64,6 +68,28 @@ def _format_duration(seconds: float) -> str:
     return f"{minutes}:{secs:02d}"
 
 
+def _validate_final_output(output_path: Path, target_duration: int, aspect_ratio: str) -> dict:
+    from output_validation import validate_output_video
+
+    try:
+        return validate_output_video(
+            video_path=output_path,
+            target_duration_seconds=target_duration,
+            aspect_ratio=aspect_ratio,
+        )
+    except Exception as exc:
+        return {
+            "path": str(output_path),
+            "valid": False,
+            "checks": {
+                "probe": {
+                    "passed": False,
+                    "error": str(exc),
+                },
+            },
+        }
+
+
 def _ensure_dirs(output_path: Path) -> None:
     """Create the output folder and a logs subfolder next to it."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -86,13 +112,28 @@ def _validate_input(input_path: Path) -> None:
 
 
 def _check_ffmpeg_available() -> None:
-    if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
-        print("\n[ERROR] FFmpeg or ffprobe was not found on your PATH.")
-        print("  Windows: https://github.com/BtbN/FFmpeg-Builds/releases")
-        print("           Download, unzip, and add the 'bin' folder to your PATH.")
-        print("  Mac:     brew install ffmpeg")
-        print("  Then open a NEW terminal and try again.\n")
-        sys.exit(1)
+    if shutil.which("ffmpeg") and shutil.which("ffprobe"):
+        return
+
+    # Bundled-installer fallback. When this script is shipped via the Windows
+    # installer, ffmpeg lives at {install}\ff\bin\ alongside the {install}\app\
+    # directory that holds this file. The CLI launcher prepends that dir to
+    # PATH already, but the Premiere CEP panel spawns Python via Node's
+    # child_process.spawn which doesn't, so without this fallback the panel
+    # sees no ffmpeg on a clean machine that lacks a system install.
+    bundled_bin = Path(__file__).resolve().parent.parent / "ff" / "bin"
+    exe_name = "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
+    if (bundled_bin / exe_name).exists():
+        os.environ["PATH"] = str(bundled_bin) + os.pathsep + os.environ.get("PATH", "")
+        if shutil.which("ffmpeg") and shutil.which("ffprobe"):
+            return
+
+    print("\n[ERROR] FFmpeg or ffprobe was not found on your PATH.")
+    print("  Windows: https://github.com/BtbN/FFmpeg-Builds/releases")
+    print("           Download, unzip, and add the 'bin' folder to your PATH.")
+    print("  Mac:     brew install ffmpeg")
+    print("  Then open a NEW terminal and try again.\n")
+    sys.exit(1)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -151,26 +192,35 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--language", default=None,
+        "--language", default=DEFAULT_LANGUAGE,
         metavar="CODE",
         help=(
-            "Whisper language code (e.g. 'en', 'es', 'fr'). "
-            "Skips auto-detection — faster and more accurate for known-language content. "
-            "Default: auto-detect."
+            "Speech language code. Sarvam AI is preferred for Indian language codes "
+            "such as 'mr-IN', 'hi-IN', and 'en-IN' when SARVAM_API_KEY is set. "
+            f"Default: {DEFAULT_LANGUAGE}."
         ),
     )
     parser.add_argument(
-        "--gap-threshold", type=float, default=0.8,
+        "--gap-threshold", type=float, default=DEFAULT_GAP_THRESHOLD,
         metavar="SECONDS",
         help=(
             "Silence gap (in seconds) treated as a filler pause and removed. "
             "Lower values remove shorter pauses (e.g. 0.5 for fast-paced content). "
-            "Default: 0.8"
+            f"Default: {DEFAULT_GAP_THRESHOLD}"
         ),
     )
     parser.add_argument(
         "--dry-run", action="store_true",
         help="Transcribe and get Claude's plan, but do NOT cut the video.",
+    )
+    parser.add_argument(
+        "--human-decisions",
+        default=None,
+        metavar="JSON",
+        help=(
+            "Optional human editor labels JSON. When supplied, accuracy_report.json "
+            "includes measured keep/remove and cut-boundary agreement."
+        ),
     )
     return parser.parse_args()
 
@@ -229,6 +279,17 @@ def main() -> None:
 
     print(f"  Found {len(transcript_segments)} transcript segment(s).")
     print()
+
+    transcript_log_path = output_path.parent / "logs" / "transcript.json"
+    transcription_provider = "unknown"
+    detected_language = args.language
+    if transcript_log_path.exists():
+        try:
+            transcript_log = json.loads(transcript_log_path.read_text(encoding="utf-8"))
+            transcription_provider = transcript_log.get("provider", transcription_provider)
+            detected_language = transcript_log.get("language", detected_language)
+        except Exception:
+            pass
 
     # ── Step 3: Analyze with Claude ────────────────────────────────────────
     print("[2/4] Asking Claude for editing decisions...")
@@ -303,6 +364,7 @@ def main() -> None:
             segments=kept_segments,
             output_path=str(output_path),
             dry_run=False,
+            aspect_ratio=args.aspect_ratio,
         )
         print()
 
@@ -327,6 +389,40 @@ def main() -> None:
         print()
 
     # ── Final summary ──────────────────────────────────────────────────────
+    output_validation = {
+        "valid": None,
+        "status": "not_applicable",
+        "reason": "No rendered FFmpeg video was produced.",
+    }
+    if not args.dry_run and args.mode == "ffmpeg":
+        print("[Validation] Probing final video geometry, audio, and duration...")
+        output_validation = _validate_final_output(
+            output_path=output_path,
+            target_duration=args.target_duration,
+            aspect_ratio=args.aspect_ratio,
+        )
+        print(f"  Valid final video: {output_validation['valid']}")
+        print()
+
+    print("[Artifacts] Writing edit decision, B-roll, and accuracy report JSON...")
+    from accuracy_outputs import write_accuracy_outputs
+    write_accuracy_outputs(
+        transcript_segments=transcript_segments,
+        kept_segments=kept_segments,
+        output_video_path=str(output_path),
+        original_duration=original_duration,
+        target_duration=args.target_duration,
+        transcription_provider=transcription_provider,
+        language=detected_language,
+        gap_threshold=args.gap_threshold,
+        human_decisions_path=args.human_decisions,
+        output_validation=output_validation,
+    )
+    print(f"  Edit decisions : {output_path.parent / 'edit_decisions.json'}")
+    print(f"  B-roll ideas    : {output_path.parent / 'broll_suggestions.json'}")
+    print(f"  Accuracy report : {output_path.parent / 'accuracy_report.json'}")
+    print()
+
     print("=" * 60)
     print("  DONE")
     print("=" * 60)
@@ -342,12 +438,18 @@ def main() -> None:
     print()
 
     if args.dry_run:
-        print("  (Dry run - no output files written)")
+        print("  (Dry run - video and subtitles were not written)")
+        print(f"  Edit decisions : {output_path.parent / 'edit_decisions.json'}")
+        print(f"  B-roll ideas    : {output_path.parent / 'broll_suggestions.json'}")
+        print(f"  Accuracy report : {output_path.parent / 'accuracy_report.json'}")
     elif args.mode == "premiere":
         csv_path = output_path.with_name(output_path.stem + "_cuts.csv")
         print(f"  Premiere XML  : {output_path.with_suffix('.xml')}")
         print(f"  Subtitles     : {output_path.with_suffix('.srt')}")
         print(f"  LosslessCut   : {csv_path}")
+        print(f"  Edit decisions: {output_path.parent / 'edit_decisions.json'}")
+        print(f"  B-roll ideas  : {output_path.parent / 'broll_suggestions.json'}")
+        print(f"  Accuracy report: {output_path.parent / 'accuracy_report.json'}")
         print()
         print("  Import into Premiere : File -> Import -> select the .xml file")
         print("  Lossless rough cut   : Drag the .csv into LosslessCut")
@@ -356,6 +458,9 @@ def main() -> None:
         print(f"  Output video  : {output_path}")
         print(f"  Subtitles     : {output_path.with_suffix('.srt')}")
         print(f"  LosslessCut   : {csv_path}")
+        print(f"  Edit decisions: {output_path.parent / 'edit_decisions.json'}")
+        print(f"  B-roll ideas  : {output_path.parent / 'broll_suggestions.json'}")
+        print(f"  Accuracy report: {output_path.parent / 'accuracy_report.json'}")
         print()
         print("  Lossless rough cut   : Drag the .csv into LosslessCut")
 

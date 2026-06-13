@@ -32,6 +32,22 @@ def _seg(text: str, start: float, end: float, words: list[dict] = None) -> dict:
 # ── Strong filler detection ───────────────────────────────────────────────────
 
 class TestDetectFillersStrongFillers:
+    def test_marathi_devanagari_filler_detected(self):
+        words = [_word("अं", 0.0, 0.4), _word("नमस्कार.", 0.4, 1.0)]
+        segs = [_seg("अं नमस्कार.", 0.0, 1.0, words)]
+
+        result = detect_fillers(segs)
+
+        assert any(r["reason"] == "filler:strong" for r in result)
+
+    def test_hindi_devanagari_filler_with_danda_detected(self):
+        words = [_word("हम्म।", 0.0, 0.4), _word("समझिए।", 0.4, 1.0)]
+        segs = [_seg("हम्म। समझिए।", 0.0, 1.0, words)]
+
+        result = detect_fillers(segs)
+
+        assert any(r["reason"] == "filler:strong" for r in result)
+
     def test_um_detected(self):
         words = [_word("um", 0.0, 0.4), _word("hello.", 0.4, 1.0)]
         segs = [_seg("um hello.", 0.0, 1.0, words)]
@@ -98,6 +114,18 @@ class TestDetectFillersStrongFillers:
 # ── Sentence-start filler detection ──────────────────────────────────────────
 
 class TestDetectFillersSentenceStart:
+    def test_sentence_start_filler_detected_after_devanagari_danda(self):
+        words = [
+            _word("समाप्त।", 0.0, 0.5),
+            _word("Okay", 0.6, 0.9),
+            _word("next.", 0.9, 1.3),
+        ]
+        segs = [_seg("समाप्त। Okay next.", 0.0, 1.3, words)]
+
+        result = detect_fillers(segs)
+
+        assert any(r["reason"] == "filler:sentence_start" for r in result)
+
     def test_so_at_very_start_detected(self):
         words = [
             _word("So", 0.0, 0.3), _word("let", 0.3, 0.5),
@@ -137,17 +165,49 @@ class TestDetectFillersSentenceStart:
 
     def test_well_after_question_detected(self):
         words = [
-            _word("Why?", 0.0, 0.5), _word("Well", 0.5, 0.8),
+            _word("Why?", 0.0, 0.5), _word("Well,", 0.5, 0.8),
             _word("because.", 0.8, 1.4),
         ]
-        segs = [_seg("Why? Well because.", 0.0, 1.4, words)]
+        segs = [_seg("Why? Well, because.", 0.0, 1.4, words)]
         result = detect_fillers(segs)
         assert any(r["reason"] == "filler:sentence_start" for r in result)
+
+    def test_now_with_semantic_time_meaning_is_not_removed(self):
+        words = [
+            _word("Now", 0.0, 0.3), _word("is", 0.3, 0.5),
+            _word("the", 0.5, 0.7), _word("right", 0.7, 1.0),
+            _word("time.", 1.0, 1.4),
+        ]
+        segs = [_seg("Now is the right time.", 0.0, 1.4, words)]
+
+        result = detect_fillers(segs)
+
+        assert not any(r["reason"] == "filler:sentence_start" for r in result)
+
+    def test_right_now_with_semantic_time_meaning_is_not_removed(self):
+        words = [
+            _word("Right", 0.0, 0.3), _word("now", 0.3, 0.6),
+            _word("patients", 0.6, 1.0), _word("need", 1.0, 1.2),
+            _word("support.", 1.2, 1.7),
+        ]
+        segs = [_seg("Right now patients need support.", 0.0, 1.7, words)]
+
+        result = detect_fillers(segs)
+
+        assert not any(r["reason"] == "filler:sentence_start" for r in result)
 
 
 # ── Gap detection ─────────────────────────────────────────────────────────────
 
 class TestDetectFillersGapDetection:
+    def test_default_threshold_detects_short_form_dead_air(self):
+        words = [_word("Hello.", 0.0, 0.5), _word("World.", 1.1, 1.8)]
+        segs = [_seg("Hello. World.", 0.0, 1.8, words)]
+
+        result = detect_fillers(segs)
+
+        assert any(r["reason"] == "gap" for r in result)
+
     def test_gap_above_threshold_detected(self):
         words = [_word("Hello.", 0.0, 0.5), _word("World.", 2.0, 2.8)]
         segs = [_seg("Hello. World.", 0.0, 2.8, words)]
@@ -225,6 +285,214 @@ class TestDetectFillersFalseStart:
         result = detect_fillers(segs)
         assert not any(r["reason"] == "false_start" for r in result)
 
+    def test_negated_contrast_is_not_removed_as_false_start(self):
+        segs = self._two_utterances(
+            [
+                ("IVF", 0.0, 0.2),
+                ("treatment", 0.2, 0.5),
+                ("is", 0.5, 0.7),
+                ("suitable", 0.7, 0.9),
+                ("for", 0.9, 1.1),
+                ("every", 1.1, 1.3),
+                ("patient", 1.3, 1.6),
+            ],
+            [
+                ("IVF", 1.7, 1.9),
+                ("treatment", 1.9, 2.2),
+                ("is", 2.2, 2.4),
+                ("not", 2.4, 2.6),
+                ("suitable", 2.6, 2.8),
+                ("for", 2.8, 3.0),
+                ("every", 3.0, 3.2),
+                ("patient.", 3.2, 3.5),
+            ],
+        )
+
+        result = detect_fillers(segs)
+
+        assert not any(r["reason"] == "false_start" for r in result)
+
+    def test_contracted_negated_contrast_is_not_removed_as_false_start(self):
+        segs = self._two_utterances(
+            [
+                ("IVF", 0.0, 0.2),
+                ("is", 0.2, 0.4),
+                ("suitable", 0.4, 0.7),
+                ("for", 0.7, 0.9),
+                ("every", 0.9, 1.1),
+                ("patient", 1.1, 1.4),
+            ],
+            [
+                ("IVF", 1.5, 1.7),
+                ("isn't", 1.7, 2.0),
+                ("suitable", 2.0, 2.3),
+                ("for", 2.3, 2.5),
+                ("every", 2.5, 2.7),
+                ("patient.", 2.7, 3.0),
+            ],
+        )
+
+        result = detect_fillers(segs)
+
+        assert not any(r["reason"] == "false_start" for r in result)
+
+    def test_didnt_contrast_is_not_removed_as_false_start(self):
+        segs = self._two_utterances(
+            [
+                ("IVF", 0.0, 0.2),
+                ("treatment", 0.2, 0.5),
+                ("worked", 0.5, 0.8),
+                ("for", 0.8, 1.0),
+                ("every", 1.0, 1.2),
+                ("patient", 1.2, 1.5),
+            ],
+            [
+                ("IVF", 1.6, 1.8),
+                ("treatment", 1.8, 2.1),
+                ("didn't", 2.1, 2.3),
+                ("work", 2.3, 2.5),
+                ("for", 2.5, 2.7),
+                ("every", 2.7, 2.9),
+                ("patient.", 2.9, 3.2),
+            ],
+        )
+
+        result = detect_fillers(segs)
+
+        assert not any(r["reason"] == "false_start" for r in result)
+
+    def test_semantic_opposites_are_not_removed_as_false_start(self):
+        segs = self._two_utterances(
+            [
+                ("Treatment", 0.0, 0.2),
+                ("increases", 0.2, 0.5),
+                ("success", 0.5, 0.7),
+                ("rates", 0.7, 0.9),
+                ("for", 0.9, 1.1),
+                ("patients", 1.1, 1.4),
+                ("significantly.", 1.4, 1.7),
+            ],
+            [
+                ("Treatment", 1.8, 2.0),
+                ("decreases", 2.0, 2.3),
+                ("success", 2.3, 2.5),
+                ("rates", 2.5, 2.7),
+                ("for", 2.7, 2.9),
+                ("patients", 2.9, 3.2),
+                ("significantly.", 3.2, 3.5),
+            ],
+        )
+
+        result = detect_fillers(segs)
+
+        assert not any(r["reason"] == "false_start" for r in result)
+
+    def test_duplicate_with_both_contrast_terms_is_removed_as_false_start(self):
+        utterance = [
+            ("We", 0.0, 0.2),
+            ("support", 0.2, 0.5),
+            ("patients", 0.5, 0.8),
+            ("before", 0.8, 1.0),
+            ("and", 1.0, 1.2),
+            ("after", 1.2, 1.4),
+            ("treatment.", 1.4, 1.7),
+        ]
+        repeated = [
+            (word, start + 1.8, end + 1.8)
+            for word, start, end in utterance
+        ]
+        segs = self._two_utterances(utterance, repeated)
+
+        result = detect_fillers(segs)
+
+        assert any(r["reason"] == "false_start" for r in result)
+
+    def test_different_numeric_claims_are_not_removed_as_false_start(self):
+        segs = self._two_utterances(
+            [
+                ("Treatment", 0.0, 0.2),
+                ("succeeds", 0.2, 0.5),
+                ("for", 0.5, 0.7),
+                ("30", 0.7, 0.9),
+                ("percent", 0.9, 1.1),
+                ("of", 1.1, 1.3),
+                ("patients.", 1.3, 1.6),
+            ],
+            [
+                ("Treatment", 1.7, 1.9),
+                ("succeeds", 1.9, 2.2),
+                ("for", 2.2, 2.4),
+                ("70", 2.4, 2.6),
+                ("percent", 2.6, 2.8),
+                ("of", 2.8, 3.0),
+                ("patients.", 3.0, 3.3),
+            ],
+        )
+
+        result = detect_fillers(segs)
+
+        assert not any(r["reason"] == "false_start" for r in result)
+
+    def test_duplicate_numeric_claim_is_removed_as_false_start(self):
+        utterance = [
+            ("Take", 0.0, 0.2),
+            ("medicine", 0.2, 0.5),
+            ("for", 0.5, 0.7),
+            ("five", 0.7, 0.9),
+            ("days", 0.9, 1.1),
+            ("after", 1.1, 1.3),
+            ("treatment.", 1.3, 1.6),
+        ]
+        repeated = [
+            (word, start + 1.7, end + 1.7)
+            for word, start, end in utterance
+        ]
+        segs = self._two_utterances(utterance, repeated)
+
+        result = detect_fillers(segs)
+
+        assert any(r["reason"] == "false_start" for r in result)
+
+    def test_different_marathi_quantities_are_not_removed_as_false_start(self):
+        segs = self._two_utterances(
+            [
+                ("औषध", 0.0, 0.2),
+                ("उपचारानंतर", 0.2, 0.5),
+                ("पाच", 0.5, 0.7),
+                ("दिवस", 0.7, 0.9),
+                ("घ्या.", 0.9, 1.2),
+            ],
+            [
+                ("औषध", 1.3, 1.5),
+                ("उपचारानंतर", 1.5, 1.8),
+                ("दहा", 1.8, 2.0),
+                ("दिवस", 2.0, 2.2),
+                ("घ्या.", 2.2, 2.5),
+            ],
+        )
+
+        result = detect_fillers(segs)
+
+        assert not any(r["reason"] == "false_start" for r in result)
+
+    def test_duplicate_marathi_quantity_is_removed_as_false_start(self):
+        utterance = [
+            ("औषध", 0.0, 0.2),
+            ("उपचारानंतर", 0.2, 0.5),
+            ("पाच", 0.5, 0.7),
+            ("दिवस", 0.7, 0.9),
+            ("घ्या.", 0.9, 1.2),
+        ]
+        repeated = [
+            (word, start + 1.3, end + 1.3)
+            for word, start, end in utterance
+        ]
+        segs = self._two_utterances(utterance, repeated)
+
+        result = detect_fillers(segs)
+
+        assert any(r["reason"] == "false_start" for r in result)
+
     def test_short_utterances_skipped(self):
         # Both utterances < _MIN_UTT_TOKENS (3) — must not be flagged
         segs = self._two_utterances(
@@ -244,6 +512,31 @@ class TestDetectFillersFalseStart:
         assert len(fs) >= 1
         assert fs[0]["start"] == 1.0
         assert fs[0]["end"] == 2.0
+
+    def test_keeps_clean_first_take_when_later_duplicate_has_fillers(self):
+        words = [
+            _word("IVF", 0.0, 0.2),
+            _word("treatment", 0.2, 0.5),
+            _word("helps", 0.5, 0.7),
+            _word("patients", 0.7, 1.0),
+            _word("understand", 1.0, 1.3),
+            _word("options.", 1.3, 1.6),
+            _word("um", 1.8, 2.0),
+            _word("sorry", 2.0, 2.3),
+            _word("IVF", 2.3, 2.5),
+            _word("treatment", 2.5, 2.8),
+            _word("helps", 2.8, 3.0),
+            _word("patients", 3.0, 3.3),
+            _word("understand", 3.3, 3.6),
+            _word("options.", 3.6, 3.9),
+        ]
+        segs = [_seg("...", 0.0, 3.9, words)]
+
+        result = detect_fillers(segs)
+        false_start = next(r for r in result if r["reason"] == "false_start")
+
+        assert false_start["start"] == 1.8
+        assert false_start["end"] == 3.9
 
 
 # ── merge_overlaps ────────────────────────────────────────────────────────────
@@ -385,6 +678,36 @@ class TestApplyRemovalsToSegments:
         result = apply_removals_to_segments(segs, [])
         assert result[0].get("language") == "en"
 
+    def test_internal_gap_splits_segment_into_clean_ranges(self):
+        words = [
+            _word("We", 0.0, 0.2),
+            _word("provide", 0.2, 0.7),
+            _word("IVF", 1.4, 1.7),
+            _word("care.", 1.7, 2.1),
+        ]
+        segs = [_seg("We provide IVF care.", 0.0, 2.1, words)]
+        removals = [{"start": 0.7, "end": 1.4, "reason": "gap"}]
+
+        result = apply_removals_to_segments(segs, removals)
+
+        assert result == [
+            {"start": 0.0, "end": 0.7, "text": "We provide"},
+            {"start": 1.4, "end": 2.1, "text": "IVF care."},
+        ]
+
+    def test_leading_filler_trims_to_first_clean_word(self):
+        words = [
+            _word("um", 0.0, 0.3),
+            _word("IVF", 0.4, 0.7),
+            _word("helps.", 0.7, 1.2),
+        ]
+        segs = [_seg("um IVF helps.", 0.0, 1.2, words)]
+        removals = [{"start": 0.0, "end": 0.3, "reason": "filler:strong"}]
+
+        result = apply_removals_to_segments(segs, removals)
+
+        assert result == [{"start": 0.4, "end": 1.2, "text": "IVF helps."}]
+
 
 # ── EOS inference ─────────────────────────────────────────────────────────────
 
@@ -399,9 +722,9 @@ class TestEosInference:
 
     def test_question_mark_triggers_sentence_start(self):
         words = [
-            _word("Really?", 0.0, 0.5), _word("Well", 0.5, 0.8), _word("yes.", 0.8, 1.2),
+            _word("Really?", 0.0, 0.5), _word("Well,", 0.5, 0.8), _word("yes.", 0.8, 1.2),
         ]
-        segs = [_seg("Really? Well yes.", 0.0, 1.2, words)]
+        segs = [_seg("Really? Well, yes.", 0.0, 1.2, words)]
         result = detect_fillers(segs)
         assert any(r["reason"] == "filler:sentence_start" for r in result)
 
@@ -411,7 +734,7 @@ class TestEosInference:
         ]
         segs = [_seg("Yes! Right here.", 0.0, 1.0, words)]
         result = detect_fillers(segs)
-        assert any(r["reason"] == "filler:sentence_start" for r in result)
+        assert not any(r["reason"] == "filler:sentence_start" for r in result)
 
     def test_comma_does_not_trigger_sentence_start(self):
         words = [
@@ -461,7 +784,10 @@ class TestIntegration:
         # "so" follows "Um" (no EOS punct) so it is NOT at sentence start — correct
 
         # Segment has mostly clean content (only first 0.5s is filler + gap) — kept
-        assert len(kept) == 1
+        assert kept == [
+            {"start": 0.3, "end": 2.5, "text": "so today I want to talk about productivity."},
+            {"start": 4.0, "end": 5.2, "text": "The key is focus."},
+        ]
 
     def test_no_words_key_skips_gracefully(self):
         segs = [

@@ -19,21 +19,66 @@ import bisect
 
 STRONG_FILLERS = frozenset({
     "um", "uh", "ah", "er", "hmm", "hm", "ugh", "mhm", "mm",
+    "अं", "अम्", "उम्", "उह", "अह", "हम्म",
 })
 
 # Only removed when appearing at the very start of a new sentence
 SENTENCE_START_FILLERS = frozenset({
     "so", "okay", "ok", "right", "well", "anyway", "basically", "alright", "now",
 })
+AMBIGUOUS_SENTENCE_START_FILLERS = frozenset({"right", "well", "now"})
 
-GAP_THRESHOLD_DEFAULT = 0.8   # silences longer than this (seconds) are flagged
+GAP_THRESHOLD_DEFAULT = 0.5   # silences longer than this (seconds) are flagged
 JACCARD_THRESHOLD     = 0.6   # word-set Jaccard for false-start detection
 BIGRAM_THRESHOLD      = 0.5   # bigram Jaccard for false-start detection
 OVERLAP_RATIO         = 0.60  # drop segment if >= 60% of its duration is filler
 
 _MIN_UTT_TOKENS = 3           # minimum tokens per utterance for false-start check
-_EOS_CHARS      = frozenset(".?!")
-_PUNCT_STRIP    = str.maketrans("", "", ".,!?;:-'\"")
+_EOS_CHARS      = frozenset(".?!।")
+_PUNCT_STRIP    = str.maketrans("", "", ".,!?;:-'\"।")
+_CORRECTION_TOKENS = frozenset({"sorry", "restart", "rephrase"})
+_NEGATION_TOKENS = frozenset({
+    "not", "no", "never", "without", "cannot",
+    "isnt", "arent", "wasnt", "werent", "doesnt", "dont", "didnt",
+    "hasnt", "havent", "hadnt", "cant", "couldnt", "wont", "wouldnt",
+    "shouldnt", "mustnt", "neednt", "shant", "aint",
+    "नाही", "नको", "नहीं", "बिना",
+})
+
+
+_SEMANTIC_CONTRAST_PAIRS = (
+    (frozenset({"safe", "safer", "safest"}), frozenset({"unsafe", "dangerous", "risky"})),
+    (
+        frozenset({"increase", "increases", "increased", "increasing", "higher", "more"}),
+        frozenset({"decrease", "decreases", "decreased", "decreasing", "lower", "less"}),
+    ),
+    (frozenset({"before", "earlier"}), frozenset({"after", "later"})),
+    (
+        frozenset({"effective", "successful", "positive"}),
+        frozenset({"ineffective", "unsuccessful", "negative"}),
+    ),
+    (
+        frozenset({"possible", "available", "allowed"}),
+        frozenset({"impossible", "unavailable", "forbidden"}),
+    ),
+)
+_QUANTITY_TOKENS = frozenset({
+    "zero", "one", "two", "three", "four", "five", "six", "seven", "eight",
+    "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen",
+    "sixteen", "seventeen", "eighteen", "nineteen", "twenty", "thirty",
+    "forty", "fifty", "sixty", "seventy", "eighty", "ninety", "hundred",
+    "thousand", "million", "billion", "half", "quarter", "first", "second",
+    "third", "fourth", "fifth",
+    "शून्य", "एक", "दोन", "दो", "तीन", "चार", "पाच", "पांच", "सहा", "छह",
+    "सात", "आठ", "नऊ", "नौ", "दहा", "दस", "अकरा", "ग्यारह", "बारा",
+    "बारह", "तेरा", "चौदा", "चौदह", "पंधरा", "पंद्रह", "सोळा", "सोलह",
+    "सतरा", "सत्रह", "अठरा", "अठारह", "एकोणीस", "उन्नीस", "वीस", "बीस",
+    "तीस", "चाळीस", "चालीस", "पन्नास", "पचास", "साठ", "सत्तर", "ऐंशी",
+    "अस्सी", "नव्वद", "नब्बे", "शंभर", "सौ", "हजार", "लाख", "कोटी",
+    "करोड़", "अर्धा", "अर्धी", "आधा", "आधी", "पहिला", "पहिली", "पहला",
+    "पहली", "दुसरा", "दुसरी", "दूसरा", "दूसरी", "तिसरा", "तिसरी",
+    "तीसरा", "तीसरी",
+})
 
 
 def _token(word_str: str) -> str:
@@ -46,6 +91,14 @@ def _is_eos(word_str: str) -> bool:
     return bool(word_str) and word_str[-1:] in _EOS_CHARS
 
 
+def _is_sentence_start_filler(word_str: str, token: str) -> bool:
+    if token not in SENTENCE_START_FILLERS:
+        return False
+    if token in AMBIGUOUS_SENTENCE_START_FILLERS:
+        return word_str.rstrip().endswith(",")
+    return True
+
+
 def _bigrams(tokens: list[str]) -> set[tuple[str, str]]:
     return {(tokens[i], tokens[i + 1]) for i in range(len(tokens) - 1)}
 
@@ -53,6 +106,54 @@ def _bigrams(tokens: list[str]) -> set[tuple[str, str]]:
 def _jaccard(a: set, b: set) -> float:
     union = a | b
     return len(a & b) / len(union) if union else 0.0
+
+
+def _has_meaning_contrast(left_tokens: list[str], right_tokens: list[str]) -> bool:
+    left_set = set(left_tokens)
+    right_set = set(right_tokens)
+    if bool(left_set & _NEGATION_TOKENS) != bool(right_set & _NEGATION_TOKENS):
+        return True
+    left_quantities = {
+        token
+        for token in left_set
+        if token in _QUANTITY_TOKENS or any(character.isdigit() for character in token)
+    }
+    right_quantities = {
+        token
+        for token in right_set
+        if token in _QUANTITY_TOKENS or any(character.isdigit() for character in token)
+    }
+    if (left_quantities or right_quantities) and left_quantities != right_quantities:
+        return True
+    for positive, negative in _SEMANTIC_CONTRAST_PAIRS:
+        left_positive = bool(left_set & positive)
+        left_negative = bool(left_set & negative)
+        right_positive = bool(right_set & positive)
+        right_negative = bool(right_set & negative)
+        if (
+            left_positive and right_negative and not left_negative and not right_positive
+            or left_negative and right_positive and not left_positive and not right_negative
+        ):
+            return True
+    return False
+
+
+def _delivery_penalty(words: list[dict], tokens: list[str]) -> float:
+    filler_penalty = sum(
+        1.0 for token in tokens if token in STRONG_FILLERS or token in SENTENCE_START_FILLERS
+    )
+    correction_penalty = sum(1.5 for token in tokens if token in _CORRECTION_TOKENS)
+    probabilities = [
+        float(word["probability"])
+        for word in words
+        if word.get("probability") is not None
+    ]
+    confidence_penalty = (
+        (1.0 - sum(probabilities) / len(probabilities)) * 2.0
+        if probabilities
+        else 0.0
+    )
+    return filler_penalty + correction_penalty + confidence_penalty
 
 
 # ── Core detection ────────────────────────────────────────────────────────────
@@ -92,8 +193,9 @@ def detect_fillers(
     prev_eos = True  # treat the very start of the recording as a sentence boundary
 
     # Utterance accumulation (sentence-grouped) for false-start detection
-    utterances: list[tuple[float, float, list[str]]] = []
+    utterances: list[tuple[float, float, list[str], list[dict]]] = []
     utt_tokens: list[str] = []
+    utt_words: list[dict] = []
     utt_start = float(all_words[0]["start"])
     utt_end   = utt_start
 
@@ -119,7 +221,7 @@ def detect_fillers(
             })
 
         # 3. Sentence-start soft filler (only flagged after an EOS word)
-        elif tok in SENTENCE_START_FILLERS and prev_eos:
+        elif prev_eos and _is_sentence_start_filler(w["word"], tok):
             removals.append({
                 "start":  round(w_start, 3),
                 "end":    round(w_end,   3),
@@ -129,12 +231,14 @@ def detect_fillers(
         # 4. Accumulate tokens for utterance grouping (all words, including fillers)
         if tok:
             utt_tokens.append(tok)
+            utt_words.append(w)
             utt_end = w_end
 
         # 5. Close utterance on EOS punctuation
         if _is_eos(w["word"]) and utt_tokens:
-            utterances.append((utt_start, utt_end, utt_tokens))
+            utterances.append((utt_start, utt_end, utt_tokens, utt_words))
             utt_tokens = []
+            utt_words = []
             nxt_start  = float(all_words[i + 1]["start"]) if i + 1 < len(all_words) else w_end
             utt_start  = nxt_start
             utt_end    = nxt_start
@@ -144,12 +248,12 @@ def detect_fillers(
 
     # Flush trailing utterance (no terminal EOS punctuation)
     if utt_tokens:
-        utterances.append((utt_start, utt_end, utt_tokens))
+        utterances.append((utt_start, utt_end, utt_tokens, utt_words))
 
     # 6. False-start detection: O(u) pass over consecutive utterance pairs
     for i in range(len(utterances) - 1):
-        u1_start, u1_end, u1_toks = utterances[i]
-        _,        _,      u2_toks = utterances[i + 1]
+        u1_start, u1_end, u1_toks, u1_words = utterances[i]
+        u2_start, u2_end, u2_toks, u2_words = utterances[i + 1]
 
         if len(u1_toks) < _MIN_UTT_TOKENS or len(u2_toks) < _MIN_UTT_TOKENS:
             continue
@@ -157,13 +261,19 @@ def detect_fillers(
         u1_set = set(u1_toks)
         u2_set = set(u2_toks)
 
+        if _has_meaning_contrast(u1_toks, u2_toks):
+            continue
+
         if (
             _jaccard(u1_set, u2_set) >= JACCARD_THRESHOLD
             or _jaccard(_bigrams(u1_toks), _bigrams(u2_toks)) >= BIGRAM_THRESHOLD
         ):
+            remove_start, remove_end = u1_start, u1_end
+            if _delivery_penalty(u2_words, u2_toks) > _delivery_penalty(u1_words, u1_toks):
+                remove_start, remove_end = u2_start, u2_end
             removals.append({
-                "start":  round(u1_start, 3),
-                "end":    round(u1_end,   3),
+                "start":  round(remove_start, 3),
+                "end":    round(remove_end,   3),
                 "reason": "false_start",
             })
 
@@ -247,7 +357,55 @@ def apply_removals_to_segments(
                 overlap += o
             j += 1
 
-        if overlap / duration < OVERLAP_RATIO:
+        if overlap / duration >= OVERLAP_RATIO:
+            continue
+
+        words = seg.get("words") or []
+        if words:
+            clean_words: list[list[dict]] = []
+            current_run: list[dict] = []
+            previous_word_end: float | None = None
+            for word in words:
+                w_start = float(word["start"])
+                w_end = float(word["end"])
+                removal_between_words = (
+                    previous_word_end is not None
+                    and any(
+                        r["start"] >= previous_word_end and r["end"] <= w_start
+                        for r in removals[idx:j]
+                    )
+                )
+                if removal_between_words and current_run:
+                    clean_words.append(current_run)
+                    current_run = []
+
+                overlaps_removal = any(
+                    min(r["end"], w_end) - max(r["start"], w_start) > 0
+                    for r in removals[idx:j]
+                )
+                if overlaps_removal:
+                    if current_run:
+                        clean_words.append(current_run)
+                        current_run = []
+                else:
+                    current_run.append(word)
+                previous_word_end = w_end
+            if current_run:
+                clean_words.append(current_run)
+
+            for run in clean_words:
+                start = round(float(run[0]["start"]), 3)
+                end = round(float(run[-1]["end"]), 3)
+                if end <= start:
+                    continue
+                clean_seg = {k: v for k, v in seg.items() if k not in {"words", "text", "start", "end"}}
+                clean_seg.update({
+                    "start": start,
+                    "end": end,
+                    "text": " ".join(w["word"].strip() for w in run if w.get("word", "").strip()),
+                })
+                kept.append(clean_seg)
+        else:
             kept.append({k: v for k, v in seg.items() if k != "words"})
 
     return kept
